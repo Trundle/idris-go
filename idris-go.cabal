@@ -1,0 +1,46 @@
+Name:           idris-go
+Version:        0.0.0.1
+License:        BSD3
+License-file:   LICENSE
+Author:         Andreas Stührk
+Maintainer: Andreas Stührk <andy@hammerhartes.de>
+Build-Type:	Simple
+Cabal-Version:  >= 1.8
+
+Executable idris-codegen-go
+  Main-is:        Main.hs
+  hs-source-dirs: src
+
+  Build-depends:  idris
+                , base
+                , containers
+                , directory
+                , filepath
+                , formatting
+                , haskeline >= 0.7
+                , mtl
+                , transformers
+                , text
+
+  other-modules: IRTS.CodegenGo
+
+  if os(linux)
+     cpp-options:   -DLINUX
+     build-depends: unix < 2.8
+  if os(freebsd)
+     cpp-options:   -DFREEBSD
+     build-depends: unix < 2.8
+  if os(dragonfly)
+     cpp-options:   -DDRAGONFLY
+     build-depends: unix < 2.8
+  if os(darwin)
+     cpp-options:   -DMACOSX
+     build-depends: unix < 2.8
+  if os(windows)
+     cpp-options:   -DWINDOWS
+     build-depends: Win32 < 2.4
+
+  ghc-prof-options: -auto-all -caf-all
+  ghc-options:      -threaded -rtsopts -funbox-strict-fields
+
+

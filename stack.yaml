@@ -1,0 +1,19 @@
+resolver: lts-8.18
+
+packages:
+  - location: .
+  - location:
+      git: git@github.com:idris-lang/Idris-dev
+      commit: master
+    extra-dep: true
+flags:
+  idris:
+    FFI: true
+    GMP: true
+
+extra-deps:
+  - libffi-0.1
+  
+nix:
+  enable: false
+  shell-file: stack-shell.nix
