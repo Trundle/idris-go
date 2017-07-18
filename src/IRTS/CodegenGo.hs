@@ -2,14 +2,12 @@
 
 module IRTS.CodegenGo (codegenGo) where
 
-import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Control.Applicative ((<|>))
 import Data.Char (isAlphaNum, ord)
 import Data.Int (Int64)
-import Data.Foldable (traverse_)
 import Data.Maybe (mapMaybe)
 import Formatting ((%), int, sformat, stext, string)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
@@ -17,7 +15,7 @@ import System.IO (IOMode (..), withFile)
 
 import Idris.Core.TT hiding (arity, V)
 import IRTS.CodegenCommon
-import IRTS.Lang (LVar (..), PrimFn (..))
+import IRTS.Lang (FDesc (..), FType (..), LVar (..), PrimFn (..))
 import IRTS.Simplified
 
 
@@ -39,6 +37,7 @@ goPreamble = T.unlines
   , ""
   , "import \"math/big\""
   , "import \"os\""
+  , "import \"strconv\""
   , "import \"unicode/utf8\""
   , "import \"unsafe\""
   , ""
@@ -117,6 +116,11 @@ goPreamble = T.unlines
   , "    return MkInt(-1)"
   , "  }"
   , "}"
+  , ""
+  , "func Go(action unsafe.Pointer) {"
+  , "  go APPLY0(action, nil)"
+  , "}"
+  , ""
   ]
 
 
@@ -151,8 +155,9 @@ exprToGo var SNothing = return $
 
 exprToGo var (SConst i@BI{}) =
   [ Line (Just var) [] (sformat ("  " % stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) (constToGo i)) ]
-exprToGo var (SConst c@Ch{}) = return $ Line (Just var) [] (mkVal var "rune" c)
-exprToGo var (SConst s@Str{}) = return $ Line (Just var) [] (mkVal var "string" s)
+exprToGo var (SConst c@Ch{}) = return $ mkVal var c (sformat ("MkRune(" % stext % ")"))
+exprToGo var (SConst i@I{}) = return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
+exprToGo var (SConst s@Str{}) = return $ mkVal var s (sformat ("MkString(" % stext % ")"))
 
 exprToGo var (SV (Loc i)) =
   [ Line (Just var) [V i] ("    " `T.append` varToGo var `T.append` " = " `T.append` lVarToGo (Loc i)) ]
@@ -202,14 +207,36 @@ exprToGo var (SCon rVar tag name args) = return $
 
 exprToGo var (SOp prim args) = return $ primToGo var prim args
 
-exprToGo _ expr = return $
-  Line Nothing [] (sformat ("    // XXX not implemented yet: " % string) (show expr))
+exprToGo var (SForeign ty (FStr name) args) =
+  let convertedArgs = [ toArg (toFType t) (lVarToGo l) | (t, l) <- args] in
+  return $ Line Nothing [] (T.pack name `T.append` "(" `T.append` T.intercalate ", " convertedArgs `T.append` ")")
+  where
+    toArg FString x = "*(*string)(" `T.append` x `T.append` ")"
+    toArg FAny x = x
+    toArg f _ = error $ "Not implemented yet: toArg " ++ show f
+
+exprToGo _ expr = error $ "Not implemented yet: " ++ show expr
 
 
-mkVal :: Var -> T.Text -> Const -> T.Text
-mkVal var ty c =
-  sformat ("  " % stext % " = unsafe.Pointer(new(" % stext % "))\n  *(*" % stext % ")(" % stext % ") = " % stext)
-    (varToGo var) ty ty (varToGo var) (constToGo c)
+toFType :: FDesc -> FType
+toFType (FCon c)
+  | c == sUN "Go_Str" = FString
+toFType (FApp c [ _, ity ])
+  | c == sUN "Go_FnT" = toFunType ity
+toFType (FApp c [ _ ])
+  | c == sUN "Go_Any" = FAny
+toFType desc = error $ "Not implemented yet: toFType " ++ show desc
+
+
+toFunType :: FDesc -> FType
+toFunType (FApp c [ _, _ ])
+    | c == sUN "Go_FnBase" = FFunction
+    | c == sUN "Go_FnIO" = FFunctionIO
+toFunType desc = error $ "Not implemented yet: toFunType " ++ show desc
+
+mkVal :: Var -> Const -> (T.Text -> T.Text) -> Line
+mkVal var c factory =
+  Line (Just var) [] (sformat ("  " % stext % " = " % stext) (varToGo var) (factory (constToGo c)))
 
 constToGo :: Const -> T.Text
 constToGo (BI i) = if i < toInteger (maxBound :: Int64) && i > toInteger (minBound :: Int64)
@@ -292,6 +319,15 @@ primToGo var (LEq (ATInt ITChar)) [left, right] =
                        , "))"
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LEq (ATInt ITBig)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool((*big.Int)("
+                       , lVarToGo left
+                       , ").Cmp((*big.Int)("
+                       , lVarToGo right
+                       , ")) == 0)"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var (LSLt (ATInt ITChar)) [left, right] =
    let code = T.concat [ varToGo var
                        , " = MkIntFromBool(*(*rune)("
@@ -301,11 +337,27 @@ primToGo var (LSLt (ATInt ITChar)) [left, right] =
                        , "))"
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LSLt (ATInt ITBig)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool((*big.Int)("
+                       , lVarToGo left
+                       , ").Cmp((*big.Int)("
+                       , lVarToGo right
+                       , ")) < 0)"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var (LMinus (ATInt ITBig)) [left, right] =
    let code = T.concat [ varToGo var
-                       , " = unsafe.Pointer((*big.Int)("
+                       , " = unsafe.Pointer(new(big.Int).Sub((*big.Int)("
                        , lVarToGo left
-                       , ").Sub((*big.Int)("
+                       , "), (*big.Int)("
+                       , lVarToGo right
+                       , ")))"
+                       ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LPlus (ATInt ITBig)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = unsafe.Pointer(new(big.Int).Add((*big.Int)("
                        , lVarToGo left
                        , "), (*big.Int)("
                        , lVarToGo right
@@ -317,6 +369,20 @@ primToGo var (LSExt ITNative ITBig) [i] =
                       , " = unsafe.Pointer(big.NewInt(*(*int64)("
                       , lVarToGo i
                       , ")))"
+                      ]
+  in Line (Just var) [ lVarToVar i ] code
+primToGo var (LIntStr ITBig) [i] =
+  let code = T.concat [ varToGo var
+                      , " = MkString((*big.Int)("
+                      , lVarToGo i
+                      , ").String())"
+                      ]
+  in Line (Just var) [ lVarToVar i ] code
+primToGo var (LIntStr ITNative) [i] =
+  let code = T.concat [ varToGo var
+                      , " = MkString(strconv.FormatInt(*(*int64)("
+                      , lVarToGo i
+                      , "), 10))"
                       ]
   in Line (Just var) [ lVarToVar i ] code
 primToGo var LStrEq [left, right] =
@@ -353,6 +419,15 @@ primToGo var LStrTail [s] =
                       , ")))"
                       ]
   in Line (Just var) [ lVarToVar s ] code
+primToGo var LStrConcat [left, right] =
+   let code = T.concat [ varToGo var
+                      , " = MkString(*(*string)("
+                      , lVarToGo left
+                      , ") + *(*string)("
+                      , lVarToGo right
+                      , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var LWriteStr [world, s] =
   let code = T.concat [ varToGo var
                       , " = WriteStr("
@@ -403,7 +478,6 @@ codegenGo ci = do
                       , T.concat (map (uncurry funToGo) (simpleDecls ci))
                       , genMain
                       ]
-  TIO.writeFile "/tmp/pl/debug.go" code
   withFile (outputFile ci) WriteMode $ \hOut -> do
     (Just hIn, _, _, p) <-
       createProcess (proc "gofmt" []){ std_in = CreatePipe, std_out = UseHandle hOut }
