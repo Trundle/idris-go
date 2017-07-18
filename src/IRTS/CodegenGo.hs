@@ -2,30 +2,32 @@
 
 module IRTS.CodegenGo (codegenGo) where
 
-import Control.Monad.Trans.State
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import Data.Char (isAlphaNum)
-import Data.Maybe (fromMaybe)
-import Formatting ((%), int, sformat, stext)
+import Control.Applicative ((<|>))
+import Data.Char (isAlphaNum, ord)
+import Data.Int (Int64)
+import Data.Foldable (traverse_)
+import Data.Maybe (mapMaybe)
+import Formatting ((%), int, sformat, stext, string)
 
-import Idris.Core.TT hiding (arity)
-import IRTS.Bytecode
+import Idris.Core.TT hiding (arity, V)
 import IRTS.CodegenCommon
-import IRTS.Lang (LVar(..))
-import IRTS.Simplified (SDecl(..))
+import IRTS.Lang (LVar (..), PrimFn (..))
+import IRTS.Simplified
 
 
-data FunState = FunState { nLocals :: Int
-                         , base :: Int
-                         , top :: Int
-                         }
-emptyFunState :: Int -> FunState
-emptyFunState arity = FunState { nLocals = arity, base = 0, top = arity }
+data Line = Line (Maybe Var) [Var] T.Text
+  deriving (Show)
 
-type Fun a = State FunState a
+join :: Line -> Line -> Line
+join (Line leftAssign leftUse left) (Line rightAssign rightUse right) =
+  Line (leftAssign <|> rightAssign) (leftUse ++ rightUse) (left `T.append` right)
 
+data Var = RVal | V Int
+   deriving (Show, Eq, Ord)
 
 goPreamble :: T.Text
 goPreamble = T.unlines
@@ -33,95 +35,370 @@ goPreamble = T.unlines
   , ""
   , "package main"
   , ""
+  , "import \"math/big\""
+  , "import \"os\""
+  , "import \"unicode/utf8\""
   , "import \"unsafe\""
   , ""
+  , "func BigIntFromString(s string) *big.Int {"
+  , "  value, _ := big.NewInt(0).SetString(s, 10)"
+  , "  return value"
+  , "}"
+  , ""
+  , "type Con struct {"
+  , "  tag int"
+  , "  args []unsafe.Pointer"
+  , "}"
+  , ""
+  , "func GetTag(con unsafe.Pointer) int64 {"
+  , "  return int64((*Con)(con).tag)"
+  , "}"
+  , ""
+  , "func MakeCon(tag int, args ...unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con{tag, args})"
+  , "}"
+  , ""
+  , "func MkIntFromBool(value bool) unsafe.Pointer {"
+  , "  var retVal *int64 = new(int64)"
+  , "  if value {"
+  , "     *retVal = 1"
+  , "  } else {"
+  , "     *retVal = 0"
+  , "  }"
+  , "  return unsafe.Pointer(retVal)"
+  , "}"
+  , ""
+  , "func MkInt(value int64) unsafe.Pointer {"
+  , "  var retVal *int64 = new(int64)"
+  , "  *retVal = value"
+  , "  return unsafe.Pointer(retVal)"
+  , "}"
+  , ""
+  , "func MkRune(value rune) unsafe.Pointer {"
+  , "  var retVal *rune = new(rune)"
+  , "  *retVal = value"
+  , "  return unsafe.Pointer(retVal)"
+  , "}"
+  , ""
+  , "func MkString(value string) unsafe.Pointer {"
+  , "  var retVal *string = new(string)"
+  , "  *retVal = value"
+  , "  return unsafe.Pointer(retVal)"
+  , "}"
+  , ""
+  , "func RuneAtIndex(s string, index int) rune {"
+  , "  if index == 0 {"
+  , "   chr, _ := utf8.DecodeRuneInString(s)"
+  , "    return chr"
+  , "  } else {"
+  , "    i := 0"
+  , "    for _, chr := range s {"
+  , "      if i == index {"
+  , "        return chr"
+  , "      }"
+  , "      i++"
+  , "    }"
+  , "  }"
+  , "panic(\"Illegal index: \" + string(index))"
+  , "}"
+  , ""
+  , "func StrTail(s string) string {"
+  , "  _, offset := utf8.DecodeRuneInString(s)"
+  , "  return s[offset:]"
+  , "}"
+  , ""
+  , "func WriteStr(str unsafe.Pointer) unsafe.Pointer {"
+  , "  _, err := os.Stdout.WriteString(*(*string)(str))"
+  , "  if (err != nil) {"
+  , "    return MkInt(0)"
+  , "  } else {"
+  , "    return MkInt(-1)"
+  , "  }"
+  , "}"
   ]
 
 
 mangleName :: Name -> T.Text
-mangleName name = T.map mangleChar (T.pack (showCG name))
+mangleName name = T.concat $ map mangleChar (showCG name)
   where
     mangleChar x
-      | isAlphaNum x = x
-      | otherwise = '_'
+      | isAlphaNum x = T.singleton x
+      | otherwise = sformat ("_" % int % "_") (ord x)
 
 nameToGo :: Name -> T.Text
 nameToGo (MN i n) | T.all (\x -> isAlphaNum x || x == '_') n =
                     n `T.append` T.pack (show i)
 nameToGo n = mangleName n
 
+lVarToGo :: LVar -> T.Text
+lVarToGo (Loc i) = sformat ("_" % int) i
+lVarToGo (Glob n) = nameToGo n
 
-regToVarName :: Reg -> Fun T.Text
-regToVarName (RVal) = return "__rval"
-regToVarName (L i) = do
-  lBase <- gets base
-  return $ sformat ("_" % int) (lBase + i)
-regToVarName (T i) = do
-  t <- gets top
-  return $ sformat ("_" % int) (t + i)
+lVarToVar :: LVar -> Var
+lVarToVar (Loc i) = V i
+lVarToVar v = error $ "LVar not convertible to var: " ++ show v
 
+varToGo :: Var -> T.Text
+varToGo RVal = "__rval"
+varToGo (V i) = sformat ("_" % int) i
 
-codeToGo :: BC -> Fun T.Text
+exprToGo :: Var -> SExp -> [Line]
 
-codeToGo (RESERVE n) = do
-  currentLocals <- gets nLocals
-  modify (\s -> s { nLocals = currentLocals + n })
-  let vars = [sformat ("_" % int) i | i <- [currentLocals + 1..currentLocals + n]]
-  return $ "var " `T.append` T.intercalate ", " vars `T.append` " unsafe.Pointer\n"
+exprToGo var SNothing = return $
+  Line (Just var) [] ("    " `T.append` varToGo var `T.append` " = nil")
 
-codeToGo (ADDTOP n) = do
-  modify (\s -> s { top = top s + n })
-  return T.empty
+exprToGo var (SConst i@BI{}) =
+  [ Line (Just var) [] (sformat ("  " % stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) (constToGo i)) ]
+exprToGo var (SConst c@Ch{}) = return $ Line (Just var) [] (mkVal var "rune" c)
+exprToGo var (SConst s@Str{}) = return $ Line (Just var) [] (mkVal var "string" s)
 
-codeToGo (ASSIGN a b) = do
-  varName <- regToVarName a
-  valueName <- regToVarName b
-  return $ varName `T.append` " = " `T.append` valueName `T.append` "\n"
+exprToGo var (SV (Loc i)) =
+  [ Line (Just var) [V i] ("    " `T.append` varToGo var `T.append` " = " `T.append` lVarToGo (Loc i)) ]
 
-codeToGo (BASETOP n) = do
-  modify (\s -> s { base = top s + n })
-  return T.empty
+exprToGo var (SLet (Loc i) e sc) =
+  let left = exprToGo (V i) e
+      right = exprToGo var sc
+  in
+  left ++ right
 
-codeToGo (TOPBASE n) = do
-  modify (\s -> s { top = base s + n })
-  return T.empty
-
-codeToGo (CALL n) = do
-  funState <- get
-  let arity = nLocals funState - base funState
-  args <- sequence [regToVarName (L i) | i <- [0..arity]]
-  return $ "__rval = " `T.append` nameToGo n `T.append` "(" `T.append` T.intercalate ", " args `T.append` ")\n"
-
-codeToGo (NULL r) = do
-  varName <- regToVarName r
-  return $ varName `T.append` " = nil\n"
-
-codeToGo c = return $ "// XXX not implemented yet: " `T.append` T.pack (show c) `T.append` "\n"
-
-
-funToGo :: Name -> [BC] -> Int -> T.Text
-funToGo name code arity = T.concat
-  [ "func "
-  , nameToGo name
-  , "("
-  , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..arity]]
-  , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
-  , body
-  , "\n    return __rval\n}\n\n"
+exprToGo var (SApp _ f vs) =
+  [ Line (Just var) [ V i | (Loc i) <- vs]
+    (sformat ("    " % stext % " = " % stext % "(" % stext % ")")
+     (varToGo var) (nameToGo f) args)
   ]
   where
-    body = T.concat $ evalState (traverse codeToGo code) (emptyFunState arity)
+    args = case vs of
+      [] -> T.empty
+      _ -> T.intercalate ", " (map lVarToGo vs)
+
+exprToGo var (SCase up (Loc l) alts)
+   | isBigIntConst alts = constBigIntCase var (V l) (dedupDefaults alts)
+   | isConst alts = constCase var (V l) alts
+   | otherwise = conCase var (V l) alts
+  where
+    isBigIntConst (SConstCase (BI _) _ : _) = True
+    isBigIntConst _ = False
+
+    isConst [] = False
+    isConst (SConstCase _ _ : _) = True
+    isConst (SConCase{} : _) = False
+    isConst (_ : _) = False
+
+    dedupDefaults (d@SDefaultCase{} : [SDefaultCase{}]) = [d]
+    dedupDefaults (x : xs) = x : dedupDefaults xs
+    dedupDefaults [] = []
+
+exprToGo var (SChkCase (Loc l) alts) = conCase var (V l) alts
+
+exprToGo var (SCon rVar tag name args) = return $
+  Line (Just var)  [ V i | (Loc i) <- args]
+  (sformat (stext % " = MakeCon(" % int % stext % ")") (varToGo var) tag argsCode)
+  where
+    argsCode = case args of
+      [] -> T.empty
+      _ -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
+
+exprToGo var (SOp prim args) = return $ primToGo var prim args
+
+exprToGo _ expr = return $
+  Line Nothing [] (sformat ("    // XXX not implemented yet: " % string) (show expr))
+
+
+mkVal :: Var -> T.Text -> Const -> T.Text
+mkVal var ty c =
+  sformat ("  " % stext % " = unsafe.Pointer(new(" % stext % "))\n  *(*" % stext % ")(" % stext % ") = " % stext)
+    (varToGo var) ty ty (varToGo var) (constToGo c)
+
+constToGo :: Const -> T.Text
+constToGo (BI i) = if i < toInteger (maxBound :: Int64) && i > toInteger (minBound :: Int64)
+  then "big.NewInt(" `T.append` T.pack (show i) `T.append` ")"
+  else "BigIntFromString(\"" `T.append` T.pack (show i) `T.append` "\")"
+constToGo (Ch '\DEL') = "'\\x7F'"
+constToGo (Ch '\SO') = "'\\x0e'"
+constToGo (Str s) = T.pack (show s)
+constToGo constVal = T.pack (show constVal)
+
+-- Special case for big.Ints, as we need to compare with Cmp there
+constBigIntCase :: Var -> Var -> [SAlt] -> [Line]
+constBigIntCase var v alts =
+  [ Line Nothing [] "switch {"
+  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+  where
+    valueCmp other = sformat ("(*big.Int)(" % stext % ").Cmp(" % stext % ") == 0") (varToGo v) (constToGo other)
+    case_ (SConstCase constVal expr) =
+      let code = exprToGo var expr in
+      Line Nothing [v] (sformat ("case " % stext % ":") (valueCmp constVal)) : code
+    case_ (SDefaultCase expr) =
+      let code = exprToGo var expr in
+      Line Nothing [] "default:" : code
+    case_ c = error $ "Unexpected big int case: " ++ show c
+
+constCase :: Var -> Var -> [SAlt] -> [Line]
+constCase var v alts =
+  [ Line Nothing [v] (T.concat [ "switch " , castValue alts , " {" ])
+  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+  where
+    castValue (SConstCase (Ch _) _ : _) = "*(*rune)(" `T.append` varToGo v `T.append` ")"
+    castValue (SConstCase (I _) _ : _) = "*(*int64)(" `T.append` varToGo v `T.append` ")"
+    castValue (SConstCase constVal _ : _) = error $ "Not implemented: cast for " ++ show constVal
+    castValue _ = error "First alt not a SConstCase!"
+
+    case_ (SDefaultCase expr) =
+      let code = exprToGo var expr in
+      Line Nothing [] "default:" : code
+    case_ (SConstCase constVal expr) =
+      let code = exprToGo var expr in
+      Line Nothing [] (T.concat [ "case " , constToGo constVal , ":" ]) : code
+    case_ c = error $ "Unexpected const case: " ++ show c
+
+
+conCase :: Var -> Var -> [SAlt] -> [Line]
+conCase var v alts =
+  [ Line Nothing [v] (T.concat [ "switch GetTag(" , varToGo v , ") {" ])
+  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+  where
+    project left i =
+      Line (Just left) [v]
+      (sformat (stext % " = (*Con)(" % stext % ").args[" % int % "]") (varToGo left) (varToGo v) i)
+    case_ (SConCase base tag name args expr) =
+      let locals = [base .. base + length args - 1]
+          code = exprToGo var expr
+          projections = [ project (V i) (i - base) | i <- locals ]
+      in
+      [ Line Nothing [] (sformat ("case " % int % ":\n  // Projection of " % stext) tag (nameToGo name))
+      ] ++ projections ++ code
+    case_ (SDefaultCase expr) =
+      let code = exprToGo var expr in
+      Line Nothing [] "default:" : code
+    case_ c = error $ "Unexpected con case: " ++ show c
+
+
+primToGo :: Var -> PrimFn -> [LVar] -> Line
+primToGo var (LChInt ITNative) [ch] =
+  let code = T.concat [ varToGo var
+                      , " = MkInt(int64(*(*rune)("
+                      , lVarToGo ch
+                      , ")))"
+                      ]
+  in Line (Just var) [ lVarToVar ch ] code
+primToGo var (LEq (ATInt ITChar)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool(*(*rune)("
+                       , lVarToGo left
+                       , ") == *(*rune)("
+                       , lVarToGo right
+                       , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LSLt (ATInt ITChar)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool(*(*rune)("
+                       , lVarToGo left
+                       , ") < *(*rune)("
+                       , lVarToGo right
+                       , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LMinus (ATInt ITBig)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = unsafe.Pointer((*big.Int)("
+                       , lVarToGo left
+                       , ").Sub((*big.Int)("
+                       , lVarToGo left
+                       , "), (*big.Int)("
+                       , lVarToGo right
+                       , ")))"
+                       ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LSExt ITNative ITBig) [i] =
+  let code = T.concat [ varToGo var
+                      , " = unsafe.Pointer(big.NewInt(*(*int64)("
+                      , lVarToGo i
+                      , ")))"
+                      ]
+  in Line (Just var) [ lVarToVar i ] code
+primToGo var LStrEq [left, right] =
+  let code = T.concat [ varToGo var
+                      , " = MkIntFromBool(*(*string)("
+                      , lVarToGo left
+                      , ") == *(*string)("
+                      , lVarToGo right
+                      , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var LStrCons [c, s] =
+   let code = T.concat [ varToGo var
+                      , " = unsafe.Pointer(new(string))\n*(*string)("
+                      , varToGo var
+                      , ") = string(*(*rune)("
+                      , lVarToGo c
+                      , ")) + *(*string)("
+                      , lVarToGo s
+                      , ")"
+                      ]
+  in Line (Just var) [ lVarToVar c, lVarToVar s ] code
+primToGo var LStrHead [s] =
+  let code = T.concat [ varToGo var
+                      , " = MkRune(RuneAtIndex(*(*string)("
+                      , lVarToGo s
+                      , "), 0))"
+                      ]
+  in Line (Just var) [ lVarToVar s ] code
+primToGo var LStrTail [s] =
+  let code = T.concat [ varToGo var
+                      , " = MkString(StrTail(*(*string)("
+                      , lVarToGo s
+                      , ")))"
+                      ]
+  in Line (Just var) [ lVarToVar s ] code
+primToGo var LWriteStr [world, s] =
+  let code = T.concat [ varToGo var
+                      , " = WriteStr("
+                      , lVarToGo s
+                      , ")"
+                      ]
+  in Line (Just var) [ lVarToVar world, lVarToVar s ] code
+primToGo _ fn _ = Line Nothing [] (sformat ("panic(\"Unimplemented PrimFn: " % string % "\")") (show fn))
+
+
+funToGo :: Name -> SDecl -> T.Text
+funToGo name (SFun _ args locs expr) = T.concat
+  [ "// "
+  , T.pack $ show name
+  ,  "\nfunc "
+  , nameToGo name
+  , "("
+  , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..length args-1]]
+  , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
+  , reserve
+  , T.unlines (mapMaybe extract bodyLines)
+  , "    return __rval\n}\n\n"
+  ]
+  where
+    bodyLines = exprToGo RVal expr
+    usedVars = S.fromList (concat [used | Line _ used _ <- bodyLines])
+    extract (Line Nothing _ line) = Just line
+    extract (Line (Just RVal) _ line) = Just line
+    extract (Line (Just v) _ line) =
+      if S.member v usedVars
+      then Just line
+      else Nothing
+    loc i =
+      let i' = length args + i in
+      if S.member (V i') usedVars
+      then Just $ sformat ("_" % int) i'
+      else Nothing
+    reserve = case mapMaybe loc [0..locs] of
+      [] -> T.empty
+      usedLocs -> "    var " `T.append` T.intercalate ", " usedLocs `T.append` " unsafe.Pointer\n"
 
 genMain :: T.Text
 genMain = "func main() { runMain0() }"
 
 codegenGo :: CodeGenerator
 codegenGo ci =
-  let byteCode = map toBC (simpleDecls ci)
-      arities = M.fromList [(n, length args) | (_, SFun n args _ _) <- simpleDecls ci]
-  in
   TIO.writeFile (outputFile ci) $ T.concat
-  [ goPreamble
-  , T.concat (map (\(n, code) -> funToGo n code (fromMaybe 0 $ M.lookup n arities)) byteCode)
-  , genMain
-  ]
+    [ goPreamble
+    , T.concat (map (uncurry funToGo) (simpleDecls ci))
+    , genMain
+    ]
