@@ -12,6 +12,8 @@ import Data.Int (Int64)
 import Data.Foldable (traverse_)
 import Data.Maybe (mapMaybe)
 import Formatting ((%), int, sformat, stext, string)
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
+import System.IO (IOMode (..), withFile)
 
 import Idris.Core.TT hiding (arity, V)
 import IRTS.CodegenCommon
@@ -396,9 +398,15 @@ genMain :: T.Text
 genMain = "func main() { runMain0() }"
 
 codegenGo :: CodeGenerator
-codegenGo ci =
-  TIO.writeFile (outputFile ci) $ T.concat
-    [ goPreamble
-    , T.concat (map (uncurry funToGo) (simpleDecls ci))
-    , genMain
-    ]
+codegenGo ci = do
+  let code = T.concat [ goPreamble
+                      , T.concat (map (uncurry funToGo) (simpleDecls ci))
+                      , genMain
+                      ]
+  TIO.writeFile "/tmp/pl/debug.go" code
+  withFile (outputFile ci) WriteMode $ \hOut -> do
+    (Just hIn, _, _, p) <-
+      createProcess (proc "gofmt" []){ std_in = CreatePipe, std_out = UseHandle hOut }
+    TIO.hPutStr hIn code
+    _ <- waitForProcess p
+    return ()

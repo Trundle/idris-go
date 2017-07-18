@@ -19,6 +19,7 @@ Executable idris-codegen-go
                 , formatting
                 , haskeline >= 0.7
                 , mtl
+                , process
                 , transformers
                 , text
 
