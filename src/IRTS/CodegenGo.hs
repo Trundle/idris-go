@@ -225,10 +225,11 @@ exprToGo var (SForeign ty (FApp callType callTypeArgs) args) =
 
     toCall ct [ FStr fname ]
       | ct == sUN "Function" = T.pack fname `T.append` "(" `T.append` T.intercalate ", " convertedArgs `T.append` ")"
-    toCall ct [ (FApp _ [ FStr _ ]), FStr methodName ] =
-      let obj : args = convertedArgs in
-      sformat (stext % "." % string % "(" % stext % ")")
-      obj methodName (T.intercalate ", " args)
+    toCall ct [ FStr _, _, FStr methodName ]
+      | ct == sUN "Method" =
+        let obj : args = convertedArgs in
+          sformat (stext % "." % string % "(" % stext % ")")
+        obj methodName (T.intercalate ", " args)
     toCall ct a = error $ show ct ++ " " ++ show a
 
     toArg (GoInterface name) x = sformat ("(*(*" % string % ")(" % stext % "))") name x

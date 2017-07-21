@@ -6,11 +6,14 @@ import Data.Vect
 
 -- The FFI
 
-data GoInterface  : String -> Type where
-  MkInterface : (i : String) -> GoInterface i
+data GoInterface : String -> Type where
+  MkInterface : (iface : String) -> GoInterface iface
 
+data Go_FFI_Call = Function String
+  | Method (GoInterface iface) String
 
 mutual
+
   ||| Go foreign types
   data Go_Types : Type -> Type where
     Go_Str       : Go_Types String
@@ -20,9 +23,6 @@ mutual
     Go_Any       : Go_Types (FFI_C.Raw a)
     -- Note that this is actually only valid as return value
     Go_MultiVal  : (Go_Types a, Go_Types b) -> Go_Types (a, b)
-
-  data Go_FFI_Call = Function String
-                   | Method Type String  -- XXX restrict to interface
 
   FFI_Go : FFI
   FFI_Go = MkFFI Go_Types Go_FFI_Call String
@@ -77,7 +77,7 @@ toEither (x, Nothing) = Right x
 
 accept : Listener -> GIO (Either GoError Conn)
 accept listener = do
-  map toEither $ gocall (Method Listener "Accept") (Listener -> GIO (Conn, Maybe GoError)) listener
+  map toEither $ gocall (Method listener "Accept") (Listener -> GIO (Conn, Maybe GoError)) listener
 
 listen : String -> String -> GIO (Either GoError Listener)
 listen net laddr = do
