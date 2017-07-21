@@ -3,9 +3,12 @@ Version:        0.0.0.1
 License:        BSD3
 License-file:   LICENSE
 Author:         Andreas Stührk
-Maintainer: Andreas Stührk <andy@hammerhartes.de>
-Build-Type:	Simple
+Maintainer:     Andreas Stührk <andy@hammerhartes.de>
+Build-Type:	    Custom
 Cabal-Version:  >= 1.8
+
+custom-setup
+  setup-depends: base, Cabal
 
 Executable idris-codegen-go
   Main-is:        Main.hs
