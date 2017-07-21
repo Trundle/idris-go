@@ -376,6 +376,15 @@ primToGo var (LEq (ATInt ITChar)) [left, right] =
                        , "))"
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LEq (ATInt ITNative)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool(*(*int64)("
+                       , lVarToGo left
+                       , ") == *(*int64)("
+                       , lVarToGo right
+                       , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var (LEq (ATInt ITBig)) [left, right] =
    let code = T.concat [ varToGo var
                        , " = MkIntFromBool((*big.Int)("
@@ -394,6 +403,15 @@ primToGo var (LSLt (ATInt ITChar)) [left, right] =
                        , "))"
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LSLt (ATInt ITNative)) [left, right] =
+   let code = T.concat [ varToGo var
+                       , " = MkIntFromBool(*(*int64)("
+                       , lVarToGo left
+                       , ") < *(*int64)("
+                       , lVarToGo right
+                       , "))"
+                      ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var (LSLt (ATInt ITBig)) [left, right] =
    let code = T.concat [ varToGo var
                        , " = MkIntFromBool((*big.Int)("
@@ -403,24 +421,10 @@ primToGo var (LSLt (ATInt ITBig)) [left, right] =
                        , ")) < 0)"
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
-primToGo var (LMinus (ATInt ITBig)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = unsafe.Pointer(new(big.Int).Sub((*big.Int)("
-                       , lVarToGo left
-                       , "), (*big.Int)("
-                       , lVarToGo right
-                       , ")))"
-                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
-primToGo var (LPlus (ATInt ITBig)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = unsafe.Pointer(new(big.Int).Add((*big.Int)("
-                       , lVarToGo left
-                       , "), (*big.Int)("
-                       , lVarToGo right
-                       , ")))"
-                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+primToGo var (LMinus (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "-"
+primToGo var (LMinus (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Sub"
+primToGo var (LPlus (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "+"
+primToGo var (LPlus (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Add"
 primToGo var (LSExt ITNative ITBig) [i] =
   let code = T.concat [ varToGo var
                       , " = unsafe.Pointer(big.NewInt(*(*int64)("
@@ -492,7 +496,35 @@ primToGo var LWriteStr [world, s] =
                       , ")"
                       ]
   in Line (Just var) [ lVarToVar world, lVarToVar s ] code
+primToGo var (LTimes (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "*"
+primToGo var (LTimes (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Mul"
 primToGo _ fn _ = Line Nothing [] (sformat ("panic(\"Unimplemented PrimFn: " % string % "\")") (show fn))
+
+bigIntBigOp :: Var -> LVar -> LVar -> T.Text -> Line
+bigIntBigOp var left right op =
+  let code = T.concat [ varToGo var
+                       , " = unsafe.Pointer(new(big.Int)."
+                       , op
+                       , "((*big.Int)("
+                       , lVarToGo left
+                       , "), (*big.Int)("
+                       , lVarToGo right
+                       , ")))"
+                       ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+
+nativeIntBinOp :: Var -> LVar -> LVar -> T.Text -> Line
+nativeIntBinOp var left right op =
+  let code = T.concat [ varToGo var
+                       , " = MkInt(*(*int64)("
+                       , lVarToGo left
+                       , ") "
+                       , op
+                       , " *(*int64)("
+                       , lVarToGo right
+                       , "))"
+                       ]
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 
 
 funToGo :: Name -> SDecl -> T.Text
