@@ -131,6 +131,12 @@ goPreamble imports = T.unlines $
   , "  }"
   , "}"
   , ""
+  -- This solely exists so the strconv import is used even if the program
+  -- doesn't use the LIntStr primitive.
+  , "func __useStrconvImport() string {"
+  , "  return strconv.Itoa(-42)"
+  , "}"
+  , ""
   ]
 
 
@@ -178,10 +184,11 @@ exprToGo var (SLet (Loc i) e sc) =
   in
   left ++ right
 
-exprToGo var (SApp _ f vs) =
-  [ Line (Just var) [ V i | (Loc i) <- vs]
-    (sformat ("    " % stext % " = " % stext % "(" % stext % ")")
-     (varToGo var) (nameToGo f) args)
+exprToGo var (SApp tailCall f vs) =
+  let comment = "// This is a tail call: " ++ show tailCall ++ "\n" in
+  [ Line (Just var) [ V i | (Loc i) <- vs ]
+    (sformat (string % "    " % stext % " = " % stext % "(" % stext % ")")
+     comment (varToGo var) (nameToGo f) args)
   ]
   where
     args = case vs of
@@ -233,23 +240,26 @@ exprToGo var (SForeign ty (FApp callType callTypeArgs) args) =
     toCall ct a = error $ show ct ++ " " ++ show a
 
     toArg (GoInterface name) x = sformat ("(*(*" % string % ")(" % stext % "))") name x
+    toArg GoByte x = "byte(*(*rune)(" `T.append` x `T.append` "))"
     toArg GoString x = "*(*string)(" `T.append` x `T.append` ")"
     toArg GoAny x = x
     toArg f _ = error $ "Not implemented yet: toArg " ++ show f
 
     ptrFromRef x = "unsafe.Pointer(&" `T.append` x `T.append` ")"
     toPtr (GoInterface _) x = ptrFromRef x
+    toPtr GoInt x = ptrFromRef x
     toPtr GoString x = ptrFromRef x
     toPtr (GoNilable valueType) x =
       sformat ("MkMaybe(" % stext % ", " % stext % " != nil)" )
       (toPtr valueType x) x
-    retRef x =
+    retRef ty x =
       sformat ("{ __tmp := " % stext % "\n " % stext % " = " % stext % " }")
-      x (varToGo var) (ptrFromRef "__tmp")
+      x (varToGo var) (toPtr ty "__tmp")
 
     retVal GoUnit x = x
-    retVal GoString x = retRef x
-    retVal (GoInterface _) x = retRef x
+    retVal GoString x = retRef GoString x
+    retVal (i@GoInterface{}) x = retRef i x
+    retVal (n@GoNilable{}) x = retRef n x
     retVal (GoMultiVal varTypes) x =
       -- XXX assumes exactly two vars
       sformat ("{ " % stext % " := " % stext % "\n " % stext % " = MakeCon(0, " % stext % ") }")
@@ -257,21 +267,27 @@ exprToGo var (SForeign ty (FApp callType callTypeArgs) args) =
       x
       (varToGo var)
       (T.intercalate ", " [ toPtr varTy (sformat ("__tmp" % int) i) | (i, varTy) <- zip [1..] varTypes ])
+    retVal (GoPtr _) x = sformat (stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) x
     retVal t _ = error $ "Not implemented yet: retVal " ++ show t
 
 exprToGo _ expr = error $ "Not implemented yet: " ++ show expr
 
 
-data GoType = GoString
+data GoType = GoByte
+            | GoInt
+            | GoString
             | GoNilable GoType
             | GoInterface String
             | GoUnit
             | GoMultiVal [GoType]
+            | GoPtr GoType
             | GoAny
   deriving (Show)
 
 fDescToGoType :: FDesc -> GoType
 fDescToGoType (FCon c)
+  | c == sUN "Go_Byte" = GoByte
+  | c == sUN "Go_Int" = GoInt
   | c == sUN "Go_Str" = GoString
   | c == sUN "Go_Unit" = GoUnit
 fDescToGoType (FApp c [ FStr name ])
@@ -282,6 +298,8 @@ fDescToGoType (FApp c [ _, ty ])
   | c == sUN "Go_Nilable" = GoNilable (fDescToGoType ty)
 fDescToGoType (FApp c [ _, _, FApp c2 [ _, _, a, b ] ])
   | c == sUN "Go_MultiVal" && c2 == sUN "MkPair" = GoMultiVal [ fDescToGoType a, fDescToGoType b ]
+fDescToGoType (FApp c [ _, ty ])
+  | c == sUN "Go_Ptr" = GoPtr (fDescToGoType ty)
 fDescToGoType f = error $ "Not implemented yet: fDescToGoType " ++ show f
 
 
@@ -339,6 +357,7 @@ constCase var v alts =
 
 
 conCase :: Var -> Var -> [SAlt] -> [Line]
+conCase var v [ (SDefaultCase expr) ] = exprToGo var expr
 conCase var v alts =
   [ Line Nothing [v] (T.concat [ "switch GetTag(" , varToGo v , ") {" ])
   ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
@@ -457,13 +476,11 @@ primToGo var LStrEq [left, right] =
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var LStrCons [c, s] =
    let code = T.concat [ varToGo var
-                      , " = unsafe.Pointer(new(string))\n*(*string)("
-                      , varToGo var
-                      , ") = string(*(*rune)("
+                      , " = MkString(string(*(*rune)("
                       , lVarToGo c
                       , ")) + *(*string)("
                       , lVarToGo s
-                      , ")"
+                      , "))"
                       ]
   in Line (Just var) [ lVarToVar c, lVarToVar s ] code
 primToGo var LStrHead [s] =
