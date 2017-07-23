@@ -2,23 +2,25 @@
 
 module IRTS.CodegenGo (codegenGo) where
 
-import qualified Data.Map.Strict as M
-import qualified Data.Set as S
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
-import Control.Applicative ((<|>))
-import Control.Monad.Trans.State (State (..), evalState, gets)
-import Data.Char (isAlphaNum, ord)
-import Data.Int (Int64)
-import Data.Maybe (fromMaybe, mapMaybe)
-import Formatting ((%), int, sformat, stext, string)
-import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
-import System.IO (IOMode (..), withFile)
+import           Control.Applicative       ((<|>))
+import           Control.Monad.Trans.State (State (..), evalState, gets)
+import           Data.Char                 (isAlphaNum, ord)
+import           Data.Int                  (Int64)
+import qualified Data.Map.Strict           as M
+import           Data.Maybe                (fromMaybe, mapMaybe)
+import qualified Data.Set                  as S
+import qualified Data.Text                 as T
+import qualified Data.Text.IO              as TIO
+import           Formatting                (int, sformat, stext, string, (%))
+import           System.IO                 (IOMode (..), withFile)
+import           System.Process            (CreateProcess (..), StdStream (..),
+                                            createProcess, proc, waitForProcess)
 
-import Idris.Core.TT hiding (arity, V)
-import IRTS.CodegenCommon
-import IRTS.Lang (FDesc (..), FType (..), LVar (..), PrimFn (..))
-import IRTS.Simplified
+import           Idris.Core.TT             hiding (V, arity)
+import           IRTS.CodegenCommon
+import           IRTS.Lang                 (FDesc (..), FType (..), LVar (..),
+                                            PrimFn (..))
+import           IRTS.Simplified
 
 
 data Line = Line (Maybe Var) [Var] T.Text
@@ -28,7 +30,7 @@ data Var = RVal | V Int
    deriving (Show, Eq, Ord)
 
 newtype CGState = CGState { requiresTrampoline :: Name -> Bool
-                       }
+                          }
 
 type CG a = State CGState a
 
@@ -171,15 +173,15 @@ nameToGo (MN i n) | T.all (\x -> isAlphaNum x || x == '_') n =
 nameToGo n = mangleName n
 
 lVarToGo :: LVar -> T.Text
-lVarToGo (Loc i) = sformat ("_" % int) i
+lVarToGo (Loc i)  = sformat ("_" % int) i
 lVarToGo (Glob n) = nameToGo n
 
 lVarToVar :: LVar -> Var
 lVarToVar (Loc i) = V i
-lVarToVar v = error $ "LVar not convertible to var: " ++ show v
+lVarToVar v       = error $ "LVar not convertible to var: " ++ show v
 
 varToGo :: Var -> T.Text
-varToGo RVal = "__rval"
+varToGo RVal  = "__rval"
 varToGo (V i) = sformat ("_" % int) i
 
 exprToGo :: Name -> Var -> SExp -> CG [Line]
@@ -234,16 +236,16 @@ exprToGo f var (SCase up (Loc l) alts)
    | otherwise = conCase f var (V l) alts
   where
     isBigIntConst (SConstCase (BI _) _ : _) = True
-    isBigIntConst _ = False
+    isBigIntConst _                         = False
 
-    isConst [] = False
+    isConst []                   = False
     isConst (SConstCase _ _ : _) = True
-    isConst (SConCase{} : _) = False
-    isConst (_ : _) = False
+    isConst (SConCase{} : _)     = False
+    isConst (_ : _)              = False
 
     dedupDefaults (d@SDefaultCase{} : [SDefaultCase{}]) = [d]
-    dedupDefaults (x : xs) = x : dedupDefaults xs
-    dedupDefaults [] = []
+    dedupDefaults (x : xs)                              = x : dedupDefaults xs
+    dedupDefaults []                                    = []
 
 exprToGo f var (SChkCase (Loc l) alts) = conCase f var (V l) alts
 
@@ -253,7 +255,7 @@ exprToGo f var (SCon rVar tag name args) = return . return $
   where
     argsCode = case args of
       [] -> T.empty
-      _ -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
+      _  -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
 
 exprToGo f var (SOp prim args) = return . return $ primToGo var prim args
 
@@ -596,8 +598,8 @@ containsTailCall _ _ = []
 
 altContainsTailCall :: Name -> SAlt -> [TailCall]
 altContainsTailCall self (SConCase _ _ _ _ e) = containsTailCall self e
-altContainsTailCall self (SConstCase _ e) = containsTailCall self e
-altContainsTailCall self (SDefaultCase e) = containsTailCall self e
+altContainsTailCall self (SConstCase _ e)     = containsTailCall self e
+altContainsTailCall self (SDefaultCase e)     = containsTailCall self e
 
 
 extractUsedVars :: [Line] -> S.Set Var
