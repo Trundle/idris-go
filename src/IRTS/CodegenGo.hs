@@ -600,10 +600,30 @@ altContainsTailCall self (SConstCase _ e) = containsTailCall self e
 altContainsTailCall self (SDefaultCase e) = containsTailCall self e
 
 
+extractUsedVars :: [Line] -> S.Set Var
+extractUsedVars lines = S.fromList (concat [used | Line _ used _ <- lines])
+
+filterUnusedLines :: [Line] -> [Line]
+filterUnusedLines lines =
+  let usedVars = extractUsedVars lines
+      requiredLines = mapMaybe (required usedVars) lines
+  in if length lines /= length requiredLines
+     -- the filtered lines might have made some other lines obsolete, filter again
+     then filterUnusedLines requiredLines
+     else lines
+  where
+    required _ l@(Line Nothing _ _) = Just l
+    required _ l@(Line (Just RVal) _ _) = Just l
+    required usedVars l@(Line (Just v) _ _) =
+      if S.member v usedVars
+      then Just l
+      else Nothing
+
+
 funToGo :: (Name, SDecl, [TailCall]) -> CG T.Text
 funToGo (name, SFun _ args locs expr, tailCalls) = do
-  bodyLines <- exprToGo name RVal expr
-  let usedVars = S.fromList (concat [used | Line _ used _ <- bodyLines])
+  bodyLines <- fmap filterUnusedLines (exprToGo name RVal expr)
+  let usedVars = extractUsedVars bodyLines
   pure . T.concat $
     [ "// "
     , T.pack $ show name
@@ -617,7 +637,7 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
     , if returnsThunk then "var __thunk thunk\n" else T.empty
     , reserve usedVars
     , tailCallEntry
-    , T.unlines (mapMaybe (extract usedVars) bodyLines)
+    , T.unlines [ line | Line _ _ line <- bodyLines ]
     , if returnsThunk then "return __thunk, __rval" else "return __rval"
     , "\n}\n\n"
     ]
@@ -626,12 +646,6 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
     tailCallEntry = if Self `elem` tailCalls
       then "entry:"
       else T.empty
-    extract _ (Line Nothing _ line) = Just line
-    extract _ (Line (Just RVal) _ line) = Just line
-    extract usedVars (Line (Just v) _ line) =
-      if S.member v usedVars
-      then Just line
-      else Nothing
     loc usedVars i =
       let i' = length args + i in
       if S.member (V i') usedVars
