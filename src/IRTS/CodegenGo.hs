@@ -2,13 +2,15 @@
 
 module IRTS.CodegenGo (codegenGo) where
 
+import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Control.Applicative ((<|>))
+import Control.Monad.Trans.State (State (..), evalState, gets)
 import Data.Char (isAlphaNum, ord)
 import Data.Int (Int64)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Formatting ((%), int, sformat, stext, string)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
 import System.IO (IOMode (..), withFile)
@@ -22,12 +24,16 @@ import IRTS.Simplified
 data Line = Line (Maybe Var) [Var] T.Text
   deriving (Show)
 
-join :: Line -> Line -> Line
-join (Line leftAssign leftUse left) (Line rightAssign rightUse right) =
-  Line (leftAssign <|> rightAssign) (leftUse ++ rightUse) (left `T.append` right)
-
 data Var = RVal | V Int
    deriving (Show, Eq, Ord)
+
+newtype CGState = CGState { requiresTrampoline :: Name -> Bool
+                       }
+
+type CG a = State CGState a
+
+createCgState :: (Name -> Bool) -> CGState
+createCgState trampolineLookup = CGState { requiresTrampoline = trampolineLookup }
 
 goPreamble :: [T.Text] -> T.Text
 goPreamble imports = T.unlines $
@@ -120,7 +126,7 @@ goPreamble imports = T.unlines $
   , "}"
   , ""
   , "func Go(action unsafe.Pointer) {"
-  , "  go APPLY0(action, nil)"
+  , "  go Trampoline(func () (thunk, unsafe.Pointer) { return APPLY0(action, nil) })"
   , "}"
   , ""
   , "func MkMaybe(value unsafe.Pointer, present bool) unsafe.Pointer {"
@@ -128,6 +134,18 @@ goPreamble imports = T.unlines $
   , "    return MakeCon(1, value)"
   , "  } else {"
   , "    return MakeCon(0)"
+  , "  }"
+  , "}"
+  , ""
+  , "type thunk func() (thunk, unsafe.Pointer)"
+  , ""
+  , "func Trampoline(f thunk) unsafe.Pointer {"
+  , "  var result unsafe.Pointer"
+  , "  for {"
+  , "    f, result = f()"
+  , "    if f == nil {"
+  , "      return result"
+  , "    }"
   , "  }"
   , "}"
   , ""
@@ -164,40 +182,51 @@ varToGo :: Var -> T.Text
 varToGo RVal = "__rval"
 varToGo (V i) = sformat ("_" % int) i
 
-exprToGo :: Name -> Var -> SExp -> [Line]
+exprToGo :: Name -> Var -> SExp -> CG [Line]
 
-exprToGo f var SNothing = return $
+exprToGo f var SNothing = return . return $
   Line (Just var) [] ("    " `T.append` varToGo var `T.append` " = nil")
 
-exprToGo f var (SConst i@BI{}) =
+exprToGo f var (SConst i@BI{}) = return
   [ Line (Just var) [] (sformat ("  " % stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) (constToGo i)) ]
-exprToGo f var (SConst c@Ch{}) = return $ mkVal var c (sformat ("MkRune(" % stext % ")"))
-exprToGo f var (SConst i@I{}) = return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
-exprToGo f var (SConst s@Str{}) = return $ mkVal var s (sformat ("MkString(" % stext % ")"))
+exprToGo f var (SConst c@Ch{}) = return . return $ mkVal var c (sformat ("MkRune(" % stext % ")"))
+exprToGo f var (SConst i@I{}) = return . return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
+exprToGo f var (SConst s@Str{}) = return . return $ mkVal var s (sformat ("MkString(" % stext % ")"))
 
-exprToGo f var (SV (Loc i)) =
+exprToGo f var (SV (Loc i)) = return
   [ Line (Just var) [V i] ("    " `T.append` varToGo var `T.append` " = " `T.append` lVarToGo (Loc i)) ]
 
-exprToGo f var (SLet (Loc i) e sc) =
-  let left = exprToGo f (V i) e
-      right = exprToGo f var sc
-  in
-  left ++ right
+exprToGo f var (SLet (Loc i) e sc) = do
+  a <- exprToGo f (V i) e
+  b <- exprToGo f var sc
+  return $ a ++ b
 
 exprToGo f var (SApp True name vs)
-  | f == name =
-    [ Line (Just (V i)) [ V a ] (sformat ("_" % int % " = _" % int) i a) | (i, (Loc a)) <- zip [0..] vs ] ++
+  -- self call, simply goto to the entry again
+  | f == name = return $
+    [ Line (Just (V i)) [ V a ] (sformat ("_" % int % " = _" % int) i a) | (i, Loc a) <- zip [0..] vs ] ++
     [ Line Nothing [ ] "goto entry" ]
-exprToGo f var (SApp tailCall name vs) =
-  let comment = "// This is a tail call: " ++ show tailCall ++ "\n" in
-  [ Line (Just var) [ V i | (Loc i) <- vs ]
-    (sformat (string % "    " % stext % " = " % stext % "(" % stext % ")")
-     comment (varToGo var) (nameToGo name) args)
-  ]
+exprToGo f RVal (SApp True name vs) = do
+  let args = T.intercalate ", " (map lVarToGo vs)
+      call = nameToGo name `T.append` "(" `T.append` args `T.append` ")"
+  trampolined <- fmap ($ name) (gets requiresTrampoline)
+  let code = if trampolined
+        then "__thunk = func() (thunk, unsafe.Pointer) { return " `T.append` call `T.append` " }"
+        else "__rval = " `T.append` call
+  return  [ Line (Just RVal) [ V i | (Loc i) <- vs ] code ]
+exprToGo _ var (SApp True _ _) = error $ "Tail-recursive call, but should be assigned to " ++ show var
+exprToGo f var (SApp False name vs) = do
+  -- Not a tail call, but we might call a function that needs to be trampolined
+  trampolined <- fmap ($ name) (gets requiresTrampoline)
+  let call = sformat (stext % "(" % stext % ")") (nameToGo name) args
+      decorated = if trampolined
+                  then sformat ("Trampoline(func () (thunk, unsafe.Pointer) { return " % stext % "})") call
+                  else call
+  return  [ Line (Just var) [ V i | (Loc i) <- vs ]
+            (sformat (stext % " = " % stext) (varToGo var) decorated)
+          ]
   where
-    args = case vs of
-      [] -> T.empty
-      _ -> T.intercalate ", " (map lVarToGo vs)
+    args = T.intercalate ", " (map lVarToGo vs)
 
 exprToGo f var (SCase up (Loc l) alts)
    | isBigIntConst alts = constBigIntCase f var (V l) (dedupDefaults alts)
@@ -218,7 +247,7 @@ exprToGo f var (SCase up (Loc l) alts)
 
 exprToGo f var (SChkCase (Loc l) alts) = conCase f var (V l) alts
 
-exprToGo f var (SCon rVar tag name args) = return $
+exprToGo f var (SCon rVar tag name args) = return . return $
   Line (Just var)  [ V i | (Loc i) <- args]
   (sformat (stext % " = MakeCon(" % int % stext % ")") (varToGo var) tag argsCode)
   where
@@ -226,11 +255,11 @@ exprToGo f var (SCon rVar tag name args) = return $
       [] -> T.empty
       _ -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
 
-exprToGo f var (SOp prim args) = return $ primToGo var prim args
+exprToGo f var (SOp prim args) = return . return $ primToGo var prim args
 
 exprToGo f var (SForeign ty (FApp callType callTypeArgs) args) =
   let call = toCall callType callTypeArgs
-  in return $ Line Nothing [] (retVal (fDescToGoType ty) call)
+  in return . return $ Line Nothing [] (retVal (fDescToGoType ty) call)
   where
     convertedArgs = [ toArg (fDescToGoType t) (lVarToGo l) | (t, l) <- args]
 
@@ -327,58 +356,61 @@ constToGo (Str s) = T.pack (show s)
 constToGo constVal = T.pack (show constVal)
 
 -- Special case for big.Ints, as we need to compare with Cmp there
-constBigIntCase :: Name -> Var -> Var -> [SAlt] -> [Line]
-constBigIntCase f var v alts =
-  [ Line Nothing [] "switch {"
-  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+constBigIntCase :: Name -> Var -> Var -> [SAlt] -> CG [Line]
+constBigIntCase f var v alts = do
+  cases <- traverse case_ alts
+  return $
+    [ Line Nothing [] "switch {" ] ++ concat cases ++ [ Line Nothing [] "}" ]
   where
     valueCmp other = sformat ("(*big.Int)(" % stext % ").Cmp(" % stext % ") == 0") (varToGo v) (constToGo other)
-    case_ (SConstCase constVal expr) =
-      let code = exprToGo f var expr in
-      Line Nothing [v] (sformat ("case " % stext % ":") (valueCmp constVal)) : code
-    case_ (SDefaultCase expr) =
-      let code = exprToGo f var expr in
-      Line Nothing [] "default:" : code
+    case_ (SConstCase constVal expr) = do
+      code <- exprToGo f var expr
+      return $ Line Nothing [v] (sformat ("case " % stext % ":") (valueCmp constVal)) : code
+    case_ (SDefaultCase expr) = do
+      code <- exprToGo f var expr
+      return $ Line Nothing [] "default:" : code
     case_ c = error $ "Unexpected big int case: " ++ show c
 
-constCase :: Name -> Var -> Var -> [SAlt] -> [Line]
-constCase f var v alts =
-  [ Line Nothing [v] (T.concat [ "switch " , castValue alts , " {" ])
-  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+constCase :: Name -> Var -> Var -> [SAlt] -> CG [Line]
+constCase f var v alts = do
+  cases <- traverse case_ alts
+  return $ [ Line Nothing [v] (T.concat [ "switch " , castValue alts , " {" ])
+           ] ++ concat cases ++ [ Line Nothing [] "}" ]
   where
     castValue (SConstCase (Ch _) _ : _) = "*(*rune)(" `T.append` varToGo v `T.append` ")"
     castValue (SConstCase (I _) _ : _) = "*(*int64)(" `T.append` varToGo v `T.append` ")"
     castValue (SConstCase constVal _ : _) = error $ "Not implemented: cast for " ++ show constVal
     castValue _ = error "First alt not a SConstCase!"
 
-    case_ (SDefaultCase expr) =
-      let code = exprToGo f var expr in
-      Line Nothing [] "default:" : code
-    case_ (SConstCase constVal expr) =
-      let code = exprToGo f var expr in
-      Line Nothing [] (T.concat [ "case " , constToGo constVal , ":" ]) : code
+    case_ (SDefaultCase expr) = do
+      code <- exprToGo f var expr
+      return $ Line Nothing [] "default:" : code
+    case_ (SConstCase constVal expr) = do
+      code <- exprToGo f var expr
+      return $
+        Line Nothing [] (T.concat [ "case " , constToGo constVal , ":" ]) : code
     case_ c = error $ "Unexpected const case: " ++ show c
 
 
-conCase :: Name -> Var -> Var -> [SAlt] -> [Line]
-conCase f var v [ (SDefaultCase expr) ] = exprToGo f var expr
-conCase f var v alts =
-  [ Line Nothing [v] (T.concat [ "switch GetTag(" , varToGo v , ") {" ])
-  ] ++ concatMap case_ alts ++ [ Line Nothing [] "}" ]
+conCase :: Name -> Var -> Var -> [SAlt] -> CG [Line]
+conCase f var v [ SDefaultCase expr ] = exprToGo f var expr
+conCase f var v alts = do
+  cases <- traverse case_ alts
+  return $ [ Line Nothing [v] (T.concat [ "switch GetTag(" , varToGo v , ") {" ])
+           ] ++ concat cases ++ [ Line Nothing [] "}" ]
   where
     project left i =
       Line (Just left) [v]
       (sformat (stext % " = (*Con)(" % stext % ").args[" % int % "]") (varToGo left) (varToGo v) i)
-    case_ (SConCase base tag name args expr) =
+    case_ (SConCase base tag name args expr) = do
       let locals = [base .. base + length args - 1]
-          code = exprToGo f var expr
           projections = [ project (V i) (i - base) | i <- locals ]
-      in
-      [ Line Nothing [] (sformat ("case " % int % ":\n  // Projection of " % stext) tag (nameToGo name))
-      ] ++ projections ++ code
-    case_ (SDefaultCase expr) =
-      let code = exprToGo f var expr in
-      Line Nothing [] "default:" : code
+      code <- exprToGo f var expr
+      return $ [ Line Nothing [] (sformat ("case " % int % ":\n  // Projection of " % stext) tag (nameToGo name))
+               ] ++ projections ++ code
+    case_ (SDefaultCase expr) = do
+      code <- exprToGo f var expr
+      return $ Line Nothing [] "default:" : code
     case_ c = error $ "Unexpected con case: " ++ show c
 
 
@@ -550,7 +582,7 @@ nativeIntBinOp var left right op =
 
 data TailCall = Self
               | Other
-  deriving (Eq)
+  deriving (Eq, Show)
 
 containsTailCall :: Name -> SExp -> [TailCall]
 containsTailCall self (SApp True n _) = if self == n
@@ -558,7 +590,8 @@ containsTailCall self (SApp True n _) = if self == n
   else [ Other ]
 containsTailCall self (SLet _ a b) = containsTailCall self a ++ containsTailCall self b
 containsTailCall self (SUpdate _ e) = containsTailCall self e
-containsTailCall self (SCase _ _ alts) = concat (map (altContainsTailCall self) alts)
+containsTailCall self (SCase _ _ alts) = concatMap (altContainsTailCall self) alts
+containsTailCall self (SChkCase _ alts) = concatMap (altContainsTailCall self) alts
 containsTailCall _ _ = []
 
 altContainsTailCall :: Name -> SAlt -> [TailCall]
@@ -567,38 +600,44 @@ altContainsTailCall self (SConstCase _ e) = containsTailCall self e
 altContainsTailCall self (SDefaultCase e) = containsTailCall self e
 
 
-funToGo :: Name -> SDecl -> T.Text
-funToGo name (SFun _ args locs expr) = T.concat $
-  [ "// "
-  , T.pack $ show name
-  ,  "\nfunc "
-  , nameToGo name
-  , "("
-  , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..length args-1]]
-  , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
-  , reserve
-  ] ++ tailCallEntry ++
-  [ T.unlines (mapMaybe extract bodyLines)
-  , "    return __rval\n}\n\n"
-  ]
+funToGo :: (Name, SDecl, [TailCall]) -> CG T.Text
+funToGo (name, SFun _ args locs expr, tailCalls) = do
+  bodyLines <- exprToGo name RVal expr
+  let usedVars = S.fromList (concat [used | Line _ used _ <- bodyLines])
+  pure . T.concat $
+    [ "// "
+    , T.pack $ show name
+    ,  "\nfunc "
+    , nameToGo name
+    , "("
+    , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..length args-1]]
+    , ") "
+    , if returnsThunk then "(thunk, unsafe.Pointer)" else "unsafe.Pointer"
+    , " {\n    var __rval unsafe.Pointer\n"
+    , if returnsThunk then "var __thunk thunk\n" else T.empty
+    , reserve usedVars
+    , tailCallEntry
+    , T.unlines (mapMaybe (extract usedVars) bodyLines)
+    , if returnsThunk then "return __thunk, __rval" else "return __rval"
+    , "\n}\n\n"
+    ]
   where
-    tailCallEntry = if elem Self (containsTailCall name expr)
-      then [ "entry:" ]
-      else []
-    bodyLines = exprToGo name RVal expr
-    usedVars = S.fromList (concat [used | Line _ used _ <- bodyLines])
-    extract (Line Nothing _ line) = Just line
-    extract (Line (Just RVal) _ line) = Just line
-    extract (Line (Just v) _ line) =
+    returnsThunk = Other `elem` tailCalls
+    tailCallEntry = if Self `elem` tailCalls
+      then "entry:"
+      else T.empty
+    extract _ (Line Nothing _ line) = Just line
+    extract _ (Line (Just RVal) _ line) = Just line
+    extract usedVars (Line (Just v) _ line) =
       if S.member v usedVars
       then Just line
       else Nothing
-    loc i =
+    loc usedVars i =
       let i' = length args + i in
       if S.member (V i') usedVars
       then Just $ sformat ("_" % int) i'
       else Nothing
-    reserve = case mapMaybe loc [0..locs] of
+    reserve usedVars = case mapMaybe (loc usedVars) [0..locs] of
       [] -> T.empty
       usedLocs -> "    var " `T.append` T.intercalate ", " usedLocs `T.append` " unsafe.Pointer\n"
 
@@ -607,8 +646,16 @@ genMain = "func main() { runMain0() }"
 
 codegenGo :: CodeGenerator
 codegenGo ci = do
-  let code = T.concat [ goPreamble (map (T.pack . show) (includes ci))
-                      , T.concat (map (uncurry funToGo) (simpleDecls ci))
+  let funs = [ (name, fun, containsTailCall name expr)
+             | (name, fun@(SFun _ _ _ expr)) <- simpleDecls ci
+             ]
+      needsTrampolineByName = M.fromList [ (name, Other `elem` tailCalls)
+                                         | (name, _, tailCalls) <- funs
+                                         ]
+      trampolineLookup = fromMaybe False . (`M.lookup` needsTrampolineByName)
+      funCodes = evalState (traverse funToGo funs) (createCgState trampolineLookup)
+      code = T.concat [ goPreamble (map (T.pack . show) (includes ci))
+                      , T.concat funCodes
                       , genMain
                       ]
   withFile (outputFile ci) WriteMode $ \hOut -> do
