@@ -65,7 +65,7 @@ goPreamble imports = T.unlines $
   , "  return int64((*Con)(con).tag)"
   , "}"
   , ""
-  , "func MakeCon(tag int, args ...unsafe.Pointer) unsafe.Pointer {"
+  , "func MkCon(tag int, args ...unsafe.Pointer) unsafe.Pointer {"
   , "  return unsafe.Pointer(&Con{tag, args})"
   , "}"
   , ""
@@ -133,9 +133,9 @@ goPreamble imports = T.unlines $
   , ""
   , "func MkMaybe(value unsafe.Pointer, present bool) unsafe.Pointer {"
   , "  if present {"
-  , "    return MakeCon(1, value)"
+  , "    return MkCon(1, value)"
   , "  } else {"
-  , "    return MakeCon(0)"
+  , "    return MkCon(0)"
   , "  }"
   , "}"
   , ""
@@ -251,7 +251,7 @@ exprToGo f var (SChkCase (Loc l) alts) = conCase f var (V l) alts
 
 exprToGo f var (SCon rVar tag name args) = return . return $
   Line (Just var)  [ V i | (Loc i) <- args]
-  (sformat (stext % " = MakeCon(" % int % stext % ")") (varToGo var) tag argsCode)
+  (sformat (stext % " = MkCon(" % int % stext % ")") (varToGo var) tag argsCode)
   where
     argsCode = case args of
       [] -> T.empty
@@ -297,7 +297,7 @@ exprToGo f var (SForeign ty (FApp callType callTypeArgs) args) =
     retVal (n@GoNilable{}) x = retRef n x
     retVal (GoMultiVal varTypes) x =
       -- XXX assumes exactly two vars
-      sformat ("{ " % stext % " := " % stext % "\n " % stext % " = MakeCon(0, " % stext % ") }")
+      sformat ("{ " % stext % " := " % stext % "\n " % stext % " = MkCon(0, " % stext % ") }")
       (T.intercalate ", " [ sformat ("__tmp" % int) i | i <- [1..length varTypes]])
       x
       (varToGo var)
