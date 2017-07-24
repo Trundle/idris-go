@@ -61,6 +61,8 @@ goPreamble imports = T.unlines $
   , "  args []unsafe.Pointer"
   , "}"
   , ""
+  , "var nullCons [256]Con"
+  , ""
   , "func GetTag(con unsafe.Pointer) int64 {"
   , "  return int64((*Con)(con).tag)"
   , "}"
@@ -135,7 +137,7 @@ goPreamble imports = T.unlines $
   , "  if present {"
   , "    return MkCon(1, value)"
   , "  } else {"
-  , "    return MkCon(0)"
+  , "    return unsafe.Pointer(&nullCons[0])"
   , "  }"
   , "}"
   , ""
@@ -249,13 +251,19 @@ exprToGo f var (SCase up (Loc l) alts)
 
 exprToGo f var (SChkCase (Loc l) alts) = conCase f var (V l) alts
 
-exprToGo f var (SCon rVar tag name args) = return . return $
+exprToGo f var (SCon _ tag name args) = return . return $
   Line (Just var)  [ V i | (Loc i) <- args]
-  (sformat (stext % " = MkCon(" % int % stext % ")") (varToGo var) tag argsCode)
+  (sformat (stext % stext % " = " % stext)
+   comment (varToGo var) mkCon)
   where
-    argsCode = case args of
-      [] -> T.empty
-      _  -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
+    comment = "// " `T.append` (T.pack . show) name `T.append` "\n"
+    mkCon
+      | tag < 256 && args == [] = sformat ("unsafe.Pointer(&nullCons[" % int % "])") tag
+      | otherwise =
+        let argsCode = case args of
+              [] -> T.empty
+              _  -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
+        in sformat ("MkCon(" % int % stext % ")") tag argsCode
 
 exprToGo f var (SOp prim args) = return . return $ primToGo var prim args
 
@@ -658,7 +666,14 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
       usedLocs -> "    var " `T.append` T.intercalate ", " usedLocs `T.append` " unsafe.Pointer\n"
 
 genMain :: T.Text
-genMain = "func main() { runMain0() }"
+genMain = T.unlines
+  [ "func main() {"
+  , "  for i := 0; i < 256; i++ {"
+  , "    nullCons[i] = Con{i, []unsafe.Pointer{}}"
+  , "  }"
+  , "  runMain0()"
+  , "}"
+  ]
 
 codegenGo :: CodeGenerator
 codegenGo ci = do
