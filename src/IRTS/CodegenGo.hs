@@ -83,13 +83,11 @@ goPreamble imports = T.unlines $
   , "}"
   , ""
   , "func MkIntFromBool(value bool) unsafe.Pointer {"
-  , "  var retVal *int64 = new(int64)"
   , "  if value {"
-  , "     *retVal = 1"
+  , "     return intOne"
   , "  } else {"
-  , "     *retVal = 0"
+  , "     return intZero"
   , "  }"
-  , "  return unsafe.Pointer(retVal)"
   , "}"
   , ""
   , "func MkInt(value int64) unsafe.Pointer {"
@@ -134,9 +132,9 @@ goPreamble imports = T.unlines $
   , "func WriteStr(str unsafe.Pointer) unsafe.Pointer {"
   , "  _, err := os.Stdout.WriteString(*(*string)(str))"
   , "  if (err != nil) {"
-  , "    return MkInt(0)"
+  , "    return intZero"
   , "  } else {"
-  , "    return MkInt(-1)"
+  , "    return intMinusOne"
   , "  }"
   , "}"
   , ""
@@ -312,6 +310,12 @@ goPreamble imports = T.unlines $
   , "  }"
   , "}"
   , ""
+  , "var bigZero *big.Int = big.NewInt(0)"
+  , "var bigOne *big.Int = big.NewInt(1)"
+  , "var intMinusOne unsafe.Pointer = MkInt(-1)"
+  , "var intZero unsafe.Pointer = MkInt(0)"
+  , "var intOne unsafe.Pointer = MkInt(1)"
+  , ""
   -- This solely exists so the strconv import is used even if the program
   -- doesn't use the LIntStr primitive.
   , "func __useStrconvImport() string {"
@@ -353,10 +357,17 @@ exprToGo :: Name -> Var -> SExp -> CG [Line]
 
 exprToGo f var SNothing = return . return $ Line (Just var) [] (assign var "nil")
 
-exprToGo f var (SConst i@BI{}) = return
-  [ Line (Just var) [] (assign var (sformat ("unsafe.Pointer(" % stext % ")") (constToGo i))) ]
+exprToGo _ var (SConst i@BI{})
+  | i == BI 0 = return [ Line (Just var) [] (assign var "unsafe.Pointer(bigZero)") ]
+  | i == BI 1 = return [ Line (Just var) [] (assign var "unsafe.Pointer(bigOne)") ]
+  | otherwise = return
+    [ Line (Just var) [] (assign var (sformat ("unsafe.Pointer(" % stext % ")") (constToGo i))) ]
 exprToGo f var (SConst c@Ch{}) = return . return $ mkVal var c (sformat ("MkRune(" % stext % ")"))
-exprToGo f var (SConst i@I{}) = return . return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
+exprToGo _ var (SConst i@I{})
+  | i == I (-1) = return . return $ Line (Just var) [] (assign var "intMinusOne")
+  | i == I 0 = return . return $ Line (Just var) [] (assign var "intZero")
+  | i == I 1 = return . return $ Line (Just var) [] (assign var "intOne")
+  | otherwise = return . return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
 exprToGo f var (SConst s@Str{}) = return . return $ mkVal var s (sformat ("MkString(" % stext % ")"))
 
 exprToGo _ (V i) (SV (Loc j))
@@ -521,9 +532,13 @@ mkVal var c factory =
   Line (Just var) [] (assign var (factory (constToGo c)))
 
 constToGo :: Const -> T.Text
-constToGo (BI i) = if i < toInteger (maxBound :: Int64) && i > toInteger (minBound :: Int64)
-  then "big.NewInt(" `T.append` T.pack (show i) `T.append` ")"
-  else "BigIntFromString(\"" `T.append` T.pack (show i) `T.append` "\")"
+constToGo (BI i)
+  | i == 0 = "bigZero"
+  | i == 1 = "bigOne"
+  | i < toInteger (maxBound :: Int64) && i > toInteger (minBound :: Int64) =
+    "big.NewInt(" `T.append` T.pack (show i) `T.append` ")"
+  | otherwise =
+    "BigIntFromString(\"" `T.append` T.pack (show i) `T.append` "\")"
 constToGo (Ch '\DEL') = "'\\x7F'"
 constToGo (Ch '\SO') = "'\\x0e'"
 constToGo (Str s) = T.pack (show s)
