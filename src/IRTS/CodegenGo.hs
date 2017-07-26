@@ -68,7 +68,11 @@ goPreamble imports = T.unlines $
   , "  args []unsafe.Pointer"
   , "}"
   , ""
-  , "var nullCons [256]Con"
+  , "type Con0 struct {"
+  , "  tag int"
+  , "}"
+  , ""
+  , "var nullCons [256]Con0"
   , ""
   , "func GetTag(con unsafe.Pointer) int64 {"
   , "  return int64((*Con)(con).tag)"
@@ -304,7 +308,7 @@ goPreamble imports = T.unlines $
   , ""
   , "func initNullCons() {"
   , "  for i := 0; i < 256; i++ {"
-  , "    nullCons[i] = Con{i, []unsafe.Pointer{}}"
+  , "    nullCons[i] = Con0{i}"
   , "  }"
   , "}"
   , ""
@@ -341,19 +345,23 @@ varToGo :: Var -> T.Text
 varToGo RVal  = "__rval"
 varToGo (V i) = sformat ("_" % int) i
 
+assign :: Var -> T.Text -> T.Text
+assign RVal x = "__thunk.arity = -1; " `T.append` varToGo RVal `T.append` " = " `T.append` x
+assign var x = varToGo var `T.append` " = " `T.append` x
+
 exprToGo :: Name -> Var -> SExp -> CG [Line]
 
-exprToGo f var SNothing = return . return $
-  Line (Just var) [] ("    " `T.append` varToGo var `T.append` " = nil")
+exprToGo f var SNothing = return . return $ Line (Just var) [] (assign var "nil")
 
 exprToGo f var (SConst i@BI{}) = return
-  [ Line (Just var) [] (sformat ("  " % stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) (constToGo i)) ]
+  [ Line (Just var) [] (assign var (sformat ("unsafe.Pointer(" % stext % ")") (constToGo i))) ]
 exprToGo f var (SConst c@Ch{}) = return . return $ mkVal var c (sformat ("MkRune(" % stext % ")"))
 exprToGo f var (SConst i@I{}) = return . return $ mkVal var i (sformat ("MkInt(" % stext % ")"))
 exprToGo f var (SConst s@Str{}) = return . return $ mkVal var s (sformat ("MkString(" % stext % ")"))
 
-exprToGo f var (SV (Loc i)) = return
-  [ Line (Just var) [V i] ("    " `T.append` varToGo var `T.append` " = " `T.append` lVarToGo (Loc i)) ]
+exprToGo _ (V i) (SV (Loc j))
+  | i == j = return []
+exprToGo _ var (SV (Loc i)) = return [ Line (Just var) [V i] (assign var (lVarToGo (Loc i))) ]
 
 exprToGo f var (SLet (Loc i) e sc) = do
   a <- exprToGo f (V i) e
@@ -370,17 +378,15 @@ exprToGo f RVal (SApp True name vs) = do
   let args = T.intercalate ", " ("__thunk" : map lVarToGo vs)
       code = if trampolined
         then mkThunk name vs
-        else "__rval = " `T.append` nameToGo name `T.append` "(" `T.append` args `T.append` ")"
+        else assign RVal (nameToGo name `T.append` "(" `T.append` args `T.append` ")")
   return  [ Line (Just RVal) [ V i | (Loc i) <- vs ] code ]
 exprToGo _ var (SApp True _ _) = error $ "Tail-recursive call, but should be assigned to " ++ show var
 exprToGo _ var (SApp False name vs) = do
   -- Not a tail call, but we might call a function that needs to be trampolined
   trampolined <- fmap ($ name) (gets requiresTrampoline)
   let code = if trampolined
-        then sformat (stext % " = Trampoline(" % stext % ")")
-             (varToGo var) (mkThunk name vs)
-        else sformat (stext % " = " % stext % "(" % stext % ")")
-             (varToGo var) (nameToGo name) args
+        then assign var (sformat ("Trampoline(" % stext % ")") (mkThunk name vs))
+        else assign var (sformat (stext % "(" % stext % ")") (nameToGo name) args)
   return  [ Line (Just var) [ V i | (Loc i) <- vs ] code ]
   where
     args = T.intercalate ", " ("__thunk" : map lVarToGo vs)
@@ -405,13 +411,11 @@ exprToGo f var (SCase up (Loc l) alts)
 exprToGo f var (SChkCase (Loc l) alts) = conCase f var (V l) alts
 
 exprToGo f var (SCon _ tag name args) = return . return $
-  Line (Just var)  [ V i | (Loc i) <- args]
-  (sformat (stext % stext % " = " % stext)
-   comment (varToGo var) mkCon)
+  Line (Just var)  [ V i | (Loc i) <- args] (comment `T.append` assign var mkCon)
   where
     comment = "// " `T.append` (T.pack . show) name `T.append` "\n"
     mkCon
-      | tag < 256 && args == [] = sformat ("unsafe.Pointer(&nullCons[" % int % "])") tag
+      | tag < 256 && null args = sformat ("unsafe.Pointer(&nullCons[" % int % "])") tag
       | otherwise =
         let argsCode = case args of
               [] -> T.empty
@@ -514,7 +518,7 @@ mkThunk f args =
 
 mkVal :: Var -> Const -> (T.Text -> T.Text) -> Line
 mkVal var c factory =
-  Line (Just var) [] (sformat ("  " % stext % " = " % stext) (varToGo var) (factory (constToGo c)))
+  Line (Just var) [] (assign var (factory (constToGo c)))
 
 constToGo :: Const -> T.Text
 constToGo (BI i) = if i < toInteger (maxBound :: Int64) && i > toInteger (minBound :: Int64)
@@ -586,48 +590,40 @@ conCase f var v alts = do
 
 primToGo :: Var -> PrimFn -> [LVar] -> Line
 primToGo var (LChInt ITNative) [ch] =
-  let code = T.concat [ varToGo var
-                      , " = MkInt(int64(*(*rune)("
-                      , lVarToGo ch
-                      , ")))"
-                      ]
-  in Line (Just var) [ lVarToVar ch ] code
+  let code = "MkInt(int64(*(*rune)(" `T.append` lVarToGo ch `T.append` ")))"
+  in Line (Just var) [ lVarToVar ch ] (assign var code)
 primToGo var (LEq (ATInt ITChar)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = MkIntFromBool(*(*rune)("
+   let code = T.concat [ "MkIntFromBool(*(*rune)("
                        , lVarToGo left
                        , ") == *(*rune)("
                        , lVarToGo right
                        , "))"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var (LEq (ATInt ITNative)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = MkIntFromBool(*(*int64)("
+   let code = T.concat [ "MkIntFromBool(*(*int64)("
                        , lVarToGo left
                        , ") == *(*int64)("
                        , lVarToGo right
                        , "))"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var (LEq (ATInt ITBig)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = MkIntFromBool((*big.Int)("
+   let code = T.concat [ "MkIntFromBool((*big.Int)("
                        , lVarToGo left
                        , ").Cmp((*big.Int)("
                        , lVarToGo right
                        , ")) == 0)"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var (LSLt (ATInt ITChar)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = MkIntFromBool(*(*rune)("
+   let code = T.concat [ "MkIntFromBool(*(*rune)("
                        , lVarToGo left
                        , ") < *(*rune)("
                        , lVarToGo right
                        , "))"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var (LSLt (ATInt ITNative)) [left, right] =
    let code = T.concat [ varToGo var
                        , " = MkIntFromBool(*(*int64)("
@@ -638,95 +634,66 @@ primToGo var (LSLt (ATInt ITNative)) [left, right] =
                       ]
   in Line (Just var) [ lVarToVar left, lVarToVar right ] code
 primToGo var (LSLt (ATInt ITBig)) [left, right] =
-   let code = T.concat [ varToGo var
-                       , " = MkIntFromBool((*big.Int)("
+   let code = T.concat [ "MkIntFromBool((*big.Int)("
                        , lVarToGo left
                        , ").Cmp((*big.Int)("
                        , lVarToGo right
                        , ")) < 0)"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var (LMinus (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "-"
 primToGo var (LMinus (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Sub"
 primToGo var (LPlus (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "+"
 primToGo var (LPlus (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Add"
 primToGo var (LSExt ITNative ITBig) [i] =
-  let code = T.concat [ varToGo var
-                      , " = unsafe.Pointer(big.NewInt(*(*int64)("
-                      , lVarToGo i
-                      , ")))"
-                      ]
-  in Line (Just var) [ lVarToVar i ] code
+  let code = "unsafe.Pointer(big.NewInt(*(*int64)(" `T.append` lVarToGo i `T.append` ")))"
+  in Line (Just var) [ lVarToVar i ] (assign var code)
 primToGo var (LIntStr ITBig) [i] =
-  let code = T.concat [ varToGo var
-                      , " = MkString((*big.Int)("
-                      , lVarToGo i
-                      , ").String())"
-                      ]
-  in Line (Just var) [ lVarToVar i ] code
+  let code = "MkString((*big.Int)(" `T.append` lVarToGo i `T.append` ").String())"
+  in Line (Just var) [ lVarToVar i ] (assign var code)
 primToGo var (LIntStr ITNative) [i] =
-  let code = T.concat [ varToGo var
-                      , " = MkString(strconv.FormatInt(*(*int64)("
-                      , lVarToGo i
-                      , "), 10))"
-                      ]
-  in Line (Just var) [ lVarToVar i ] code
+  let code = "MkString(strconv.FormatInt(*(*int64)(" `T.append` lVarToGo i `T.append` "), 10))"
+  in Line (Just var) [ lVarToVar i ] (assign var code)
 primToGo var LStrEq [left, right] =
-  let code = T.concat [ varToGo var
-                      , " = MkIntFromBool(*(*string)("
+  let code = T.concat [ "MkIntFromBool(*(*string)("
                       , lVarToGo left
                       , ") == *(*string)("
                       , lVarToGo right
                       , "))"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var LStrCons [c, s] =
-   let code = T.concat [ varToGo var
-                      , " = MkString(string(*(*rune)("
+   let code = T.concat [ "MkString(string(*(*rune)("
                       , lVarToGo c
                       , ")) + *(*string)("
                       , lVarToGo s
                       , "))"
                       ]
-  in Line (Just var) [ lVarToVar c, lVarToVar s ] code
+  in Line (Just var) [ lVarToVar c, lVarToVar s ] (assign var code)
 primToGo var LStrHead [s] =
-  let code = T.concat [ varToGo var
-                      , " = MkRune(RuneAtIndex(*(*string)("
-                      , lVarToGo s
-                      , "), 0))"
-                      ]
-  in Line (Just var) [ lVarToVar s ] code
+  let code = "MkRune(RuneAtIndex(*(*string)(" `T.append` lVarToGo s `T.append` "), 0))"
+  in Line (Just var) [ lVarToVar s ] (assign var code)
 primToGo var LStrTail [s] =
-  let code = T.concat [ varToGo var
-                      , " = MkString(StrTail(*(*string)("
-                      , lVarToGo s
-                      , ")))"
-                      ]
-  in Line (Just var) [ lVarToVar s ] code
+  let code = "MkString(StrTail(*(*string)(" `T.append` lVarToGo s `T.append` ")))"
+  in Line (Just var) [ lVarToVar s ] (assign var code)
 primToGo var LStrConcat [left, right] =
-   let code = T.concat [ varToGo var
-                      , " = MkString(*(*string)("
+   let code = T.concat [ "MkString(*(*string)("
                       , lVarToGo left
                       , ") + *(*string)("
                       , lVarToGo right
                       , "))"
                       ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 primToGo var LWriteStr [world, s] =
-  let code = T.concat [ varToGo var
-                      , " = WriteStr("
-                      , lVarToGo s
-                      , ")"
-                      ]
-  in Line (Just var) [ lVarToVar world, lVarToVar s ] code
+  let code = "WriteStr(" `T.append` lVarToGo s `T.append` ")"
+  in Line (Just var) [ lVarToVar world, lVarToVar s ] (assign var code)
 primToGo var (LTimes (ATInt ITNative)) [left, right] = nativeIntBinOp var left right "*"
 primToGo var (LTimes (ATInt ITBig)) [left, right] = bigIntBigOp var left right "Mul"
 primToGo _ fn _ = Line Nothing [] (sformat ("panic(\"Unimplemented PrimFn: " % string % "\")") (show fn))
 
 bigIntBigOp :: Var -> LVar -> LVar -> T.Text -> Line
 bigIntBigOp var left right op =
-  let code = T.concat [ varToGo var
-                       , " = unsafe.Pointer(new(big.Int)."
+  let code = T.concat [ "unsafe.Pointer(new(big.Int)."
                        , op
                        , "((*big.Int)("
                        , lVarToGo left
@@ -734,12 +701,11 @@ bigIntBigOp var left right op =
                        , lVarToGo right
                        , ")))"
                        ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 
 nativeIntBinOp :: Var -> LVar -> LVar -> T.Text -> Line
 nativeIntBinOp var left right op =
-  let code = T.concat [ varToGo var
-                       , " = MkInt(*(*int64)("
+  let code = T.concat [ "MkInt(*(*int64)("
                        , lVarToGo left
                        , ") "
                        , op
@@ -747,7 +713,7 @@ nativeIntBinOp var left right op =
                        , lVarToGo right
                        , "))"
                        ]
-  in Line (Just var) [ lVarToVar left, lVarToVar right ] code
+  in Line (Just var) [ lVarToVar left, lVarToVar right ] (assign var code)
 
 
 data TailCall = Self
@@ -805,7 +771,6 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
     , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
     , reserve usedVars
     , tailCallEntry
-    , "__thunk.arity = -1\n"
     , T.unlines [ line | Line _ _ line <- bodyLines ]
     , "return __rval\n}\n\n"
     ]
