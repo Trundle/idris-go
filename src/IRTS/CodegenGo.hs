@@ -62,23 +62,72 @@ goPreamble imports = T.unlines $
   , "  return value"
   , "}"
   , ""
-  , "type Con struct {"
-  , "  tag int"
-  , "  args []unsafe.Pointer"
-  , "}"
-  , ""
   , "type Con0 struct {"
   , "  tag int"
   , "}"
   , ""
-  , "var nullCons [256]Con0"
-  , ""
-  , "func GetTag(con unsafe.Pointer) int64 {"
-  , "  return int64((*Con)(con).tag)"
+  , "type Con1 struct {"
+  , "  tag int"
+  , "  _0 unsafe.Pointer"
   , "}"
   , ""
-  , "func MkCon(tag int, args ...unsafe.Pointer) unsafe.Pointer {"
-  , "  return unsafe.Pointer(&Con{tag, args})"
+  , "type Con2 struct {"
+  , "  tag int"
+  , "  _0, _1 unsafe.Pointer"
+  , "}"
+  , ""
+  , "type Con3 struct {"
+  , "  tag int"
+  , "  _0, _1, _2 unsafe.Pointer"
+  , "}"
+  , ""
+  , "type Con4 struct {"
+  , "  tag int"
+  , "  _0, _1, _2, _3 unsafe.Pointer"
+  , "}"
+  , ""
+  , "type Con5 struct {"
+  , "  tag int"
+  , "  _0, _1, _2, _3, _4 unsafe.Pointer"
+  , "}"
+  , ""
+  , "type Con6 struct {"
+  , "  tag int"
+  , "  _0, _1, _2, _3, _4, _5 unsafe.Pointer"
+  , "}"
+  , ""
+  , "var nullCons [256]Con0"
+  , ""
+  , "func GetTag(con unsafe.Pointer) int {"
+  , "  return (*Con0)(con).tag"
+  , "}"
+  , ""
+  , "func MkCon0(tag int) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con0{tag})"
+  , "}"
+  , ""
+  , "func MkCon1(tag int, _0 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con1{tag, _0})"
+  , "}"
+  , ""
+  , "func MkCon2(tag int, _0, _1 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con2{tag, _0, _1})"
+  , "}"
+  , ""
+  , "func MkCon3(tag int, _0, _1, _2 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con3{tag, _0, _1, _2})"
+  , "}"
+  , ""
+  , "func MkCon4(tag int, _0, _1, _2, _3 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con4{tag, _0, _1, _2, _3})"
+  , "}"
+  , ""
+  , "func MkCon5(tag int, _0, _1, _2, _3, _4 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con5{tag, _0, _1, _2, _3, _4})"
+  , "}"
+  , ""
+  , "func MkCon6(tag int, _0, _1, _2, _3, _4, _5 unsafe.Pointer) unsafe.Pointer {"
+  , "  return unsafe.Pointer(&Con6{tag, _0, _1, _2, _3, _4, _5})"
   , "}"
   , ""
   , "func MkIntFromBool(value bool) unsafe.Pointer {"
@@ -144,7 +193,7 @@ goPreamble imports = T.unlines $
   , ""
   , "func MkMaybe(value unsafe.Pointer, present bool) unsafe.Pointer {"
   , "  if present {"
-  , "    return MkCon(1, value)"
+  , "    return MkCon1(1, value)"
   , "  } else {"
   , "    return unsafe.Pointer(&nullCons[0])"
   , "  }"
@@ -405,7 +454,7 @@ exprToGo f var (SCon _ tag name args) = return . return $
         let argsCode = case args of
               [] -> T.empty
               _  -> ", " `T.append` T.intercalate ", " (map lVarToGo args)
-        in sformat ("MkCon(" % int % stext % ")") tag argsCode
+        in sformat ("MkCon" % int % "(" % int % stext % ")") (length args) tag argsCode
 
 exprToGo f var (SOp prim args) = return . return $ primToGo var prim args
 
@@ -447,10 +496,11 @@ exprToGo f var (SForeign ty (FApp callType callTypeArgs) args) =
     retVal (n@GoNilable{}) x = retRef n x
     retVal (GoMultiVal varTypes) x =
       -- XXX assumes exactly two vars
-      sformat ("{ " % stext % " := " % stext % "\n " % stext % " = MkCon(0, " % stext % ") }")
+      sformat ("{ " % stext % " := " % stext % "\n " % stext % " = MkCon" % int % "(0, " % stext % ") }")
       (T.intercalate ", " [ sformat ("__tmp" % int) i | i <- [1..length varTypes]])
       x
       (varToGo var)
+      (length varTypes)
       (T.intercalate ", " [ toPtr varTy (sformat ("__tmp" % int) i) | (i, varTy) <- zip [1..] varTypes ])
     retVal (GoPtr _) x = sformat (stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) x
     retVal t _ = error $ "Not implemented yet: retVal " ++ show t
@@ -564,7 +614,7 @@ conCase f var v alts = do
   where
     project left i =
       Line (Just left) [v]
-      (sformat (stext % " = (*Con)(" % stext % ").args[" % int % "]") (varToGo left) (varToGo v) i)
+      (assign left (sformat ("(*Con" % int % ")(" % stext % ")._" % int) (i+1) (varToGo v) i))
     case_ (SConCase base tag name args expr) = do
       let locals = [base .. base + length args - 1]
           projections = [ project (V i) (i - base) | i <- locals ]
