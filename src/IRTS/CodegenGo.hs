@@ -405,7 +405,7 @@ exprToGo f var (SLet (Loc i) e sc) = do
 exprToGo f var (SApp True name vs)
   -- self call, simply goto to the entry again
   | f == name = return $
-    [ Line (Just (V i)) [ V a ] (sformat ("_" % int % " = _" % int) i a) | (i, Loc a) <- zip [0..] vs ] ++
+    [ Line (Just (V i)) [ V a ] (sformat ("_" % int % " = _" % int) i a) | (i, Loc a) <- zip [0..] vs, i /= a ] ++
     [ Line Nothing [ ] "goto entry" ]
 exprToGo f RVal (SApp True name vs) = do
   trampolined <- fmap ($ name) (gets requiresTrampoline)
