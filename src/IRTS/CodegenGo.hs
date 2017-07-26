@@ -367,9 +367,9 @@ exprToGo f var (SApp True name vs)
     [ Line Nothing [ ] "goto entry" ]
 exprToGo f RVal (SApp True name vs) = do
   trampolined <- fmap ($ name) (gets requiresTrampoline)
-  let args = T.intercalate ", " (map lVarToGo vs)
+  let args = T.intercalate ", " ("__thunk" : map lVarToGo vs)
       code = if trampolined
-        then mkThunk name vs "__thunk"
+        then mkThunk name vs
         else "__rval = " `T.append` nameToGo name `T.append` "(" `T.append` args `T.append` ")"
   return  [ Line (Just RVal) [ V i | (Loc i) <- vs ] code ]
 exprToGo _ var (SApp True _ _) = error $ "Tail-recursive call, but should be assigned to " ++ show var
@@ -377,13 +377,13 @@ exprToGo _ var (SApp False name vs) = do
   -- Not a tail call, but we might call a function that needs to be trampolined
   trampolined <- fmap ($ name) (gets requiresTrampoline)
   let code = if trampolined
-        then sformat ("{ var __tr_thunk Thunk\n" % stext % " = Trampoline(" % stext % ") }")
-             (varToGo var) (mkThunk name vs "&__tr_thunk")
+        then sformat (stext % " = Trampoline(" % stext % ")")
+             (varToGo var) (mkThunk name vs)
         else sformat (stext % " = " % stext % "(" % stext % ")")
              (varToGo var) (nameToGo name) args
   return  [ Line (Just var) [ V i | (Loc i) <- vs ] code ]
   where
-    args = T.intercalate ", " (map lVarToGo vs)
+    args = T.intercalate ", " ("__thunk" : map lVarToGo vs)
 
 exprToGo f var (SCase up (Loc l) alts)
    | isBigIntConst alts = constBigIntCase f var (V l) (dedupDefaults alts)
@@ -505,12 +505,12 @@ toFunType (FApp c [ _, _ ])
     | c == sUN "Go_FnIO" = FFunctionIO
 toFunType desc = error $ "Not implemented yet: toFunType " ++ show desc
 
-mkThunk :: Name -> [LVar] -> T.Text -> T.Text
-mkThunk f [] thunkName =
-  sformat ("MkThunk0(" % stext % ", " % stext % ")") thunkName (nameToGo f)
-mkThunk f args thunkName =
-  sformat ("MkThunk" % int % "(" % stext % ", " % stext % ", " % stext % ")")
-  (length args) thunkName (nameToGo f) (T.intercalate "," (map lVarToGo args))
+mkThunk :: Name -> [LVar] -> T.Text
+mkThunk f [] =
+  sformat ("MkThunk0(__thunk, " % stext % ")") (nameToGo f)
+mkThunk f args =
+  sformat ("MkThunk" % int % "(__thunk, " % stext % ", " % stext % ")")
+  (length args) (nameToGo f) (T.intercalate "," (map lVarToGo args))
 
 mkVal :: Var -> Const -> (T.Text -> T.Text) -> Line
 mkVal var c factory =
@@ -800,19 +800,16 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
     ,  "\nfunc "
     , nameToGo name
     , "("
-    , if hasThunk
-      then "__thunk *Thunk" `T.append` if (not . null) args then ", " else T.empty
-      else T.empty
+    , "__thunk *Thunk" `T.append` if (not . null) args then ", " else T.empty
     , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..length args-1]]
     , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
     , reserve usedVars
     , tailCallEntry
-    , if hasThunk then "__thunk.arity = -1\n" else T.empty
+    , "__thunk.arity = -1\n"
     , T.unlines [ line | Line _ _ line <- bodyLines ]
     , "return __rval\n}\n\n"
     ]
   where
-    hasThunk = Other `elem` tailCalls && name /= MN 0 "runMain"
     tailCallEntry = if Self `elem` tailCalls
       then "entry:"
       else T.empty
@@ -843,7 +840,8 @@ genMain = T.unlines
   , "    }"
   , "    defer pprof.StopCPUProfile()"
   , "  }"
-  , "  runMain0()"
+  , "  var thunk Thunk"
+  , "  runMain0(&thunk)"
   , "  if *memprofile != \"\" {"
   , "    f, err := os.Create(*memprofile)"
   , "    if err != nil {"
