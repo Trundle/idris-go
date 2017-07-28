@@ -89,10 +89,8 @@ echoServer listener =
     handleLine reader writer = do
       Right line <- readString reader (MkByte '\n')
         | Left e => putStrLn' ("Could not read line: " ++ errorDesc e)
-      (_, error) <- writeString writer line
-      case error of
-        Just e => putStrLn' ("Could not send line back: " ++ errorDesc e)
-        Nothing => pure ()
+      (_, Nothing) <- writeString writer line
+        | (_, Just e) => putStrLn' ("Could not send line back: " ++ errorDesc e)
       flush writer
       handleLine reader writer
 

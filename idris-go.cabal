@@ -26,7 +26,8 @@ Executable idris-codegen-go
                 , transformers
                 , text
 
-  other-modules: IRTS.CodegenGo
+  other-modules:  IRTS.CodegenGo
+                , IRTS.SSA
 
   if os(linux)
      cpp-options:   -DLINUX

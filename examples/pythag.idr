@@ -10,4 +10,4 @@ pythag max = [
   ]
 
 main : IO ()
-main = printLn $ pythag 100
+main = printLn $ pythag 500

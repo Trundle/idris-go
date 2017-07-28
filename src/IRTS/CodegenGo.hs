@@ -2,25 +2,28 @@
 
 module IRTS.CodegenGo (codegenGo) where
 
-import           Control.Applicative       ((<|>))
-import           Control.Monad.Trans.State (State (..), evalState, gets)
-import           Data.Char                 (isAlphaNum, ord)
-import           Data.Int                  (Int64)
-import qualified Data.Map.Strict           as M
-import           Data.Maybe                (fromMaybe, mapMaybe)
-import qualified Data.Set                  as S
-import qualified Data.Text                 as T
-import qualified Data.Text.IO              as TIO
-import           Formatting                (int, sformat, stext, string, (%))
-import           System.IO                 (IOMode (..), withFile)
-import           System.Process            (CreateProcess (..), StdStream (..),
-                                            createProcess, proc, waitForProcess)
+import           Control.Monad.Trans.State.Strict (State, evalState, gets)
+import           Data.Char                        (isAlphaNum, ord)
+import           Data.Int                         (Int64)
+import qualified Data.Map.Strict                  as M
+import           Data.Maybe                       (fromMaybe, mapMaybe)
+import qualified Data.Set                         as S
+import qualified Data.Text                        as T
+import qualified Data.Text.IO                     as TIO
+import           Formatting                       (int, sformat, stext, string,
+                                                   (%))
+import           System.IO                        (IOMode (..), withFile)
+import           System.Process                   (CreateProcess (..),
+                                                   StdStream (..),
+                                                   createProcess, proc,
+                                                   waitForProcess)
 
-import           Idris.Core.TT             hiding (V, arity)
+import           Idris.Core.TT                    hiding (V, arity)
 import           IRTS.CodegenCommon
-import           IRTS.Lang                 (FDesc (..), FType (..), LVar (..),
-                                            PrimFn (..))
+import           IRTS.Lang                        (FDesc (..), FType (..),
+                                                   LVar (..), PrimFn (..))
 import           IRTS.Simplified
+import           IRTS.SSA                         (toSSA)
 
 
 data Line = Line (Maybe Var) [Var] T.Text
@@ -796,8 +799,9 @@ filterUnusedLines lines =
 
 
 funToGo :: (Name, SDecl, [TailCall]) -> CG T.Text
-funToGo (name, SFun _ args locs expr, tailCalls) = do
-  bodyLines <- fmap filterUnusedLines (exprToGo name RVal expr)
+funToGo (name, f@(SFun _ args _ _), tailCalls) = do
+  let (locs, ssaExpr) = toSSA f
+  bodyLines <- filterUnusedLines <$> exprToGo name RVal ssaExpr
   let usedVars = extractUsedVars bodyLines
   pure . T.concat $
     [ "// "
@@ -808,7 +812,7 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
     , "__thunk *Thunk" `T.append` if (not . null) args then ", " else T.empty
     , T.intercalate ", " [ sformat ("_" % int % " unsafe.Pointer") i | i <- [0..length args-1]]
     , ") unsafe.Pointer {\n    var __rval unsafe.Pointer\n"
-    , reserve usedVars
+    , reserve usedVars locs
     , tailCallEntry
     , T.unlines [ line | Line _ _ line <- bodyLines ]
     , "return __rval\n}\n\n"
@@ -822,7 +826,7 @@ funToGo (name, SFun _ args locs expr, tailCalls) = do
       if S.member (V i') usedVars
       then Just $ sformat ("_" % int) i'
       else Nothing
-    reserve usedVars = case mapMaybe (loc usedVars) [0..locs] of
+    reserve usedVars locs = case mapMaybe (loc usedVars) [0..locs] of
       [] -> T.empty
       usedLocs -> "    var " `T.append` T.intercalate ", " usedLocs `T.append` " unsafe.Pointer\n"
 
