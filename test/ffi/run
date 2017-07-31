@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+idris --codegen go -p go ffi.idr -o ffi.go
+go build ffi.go
+rm ffi.go ffi.ibc
+./ffi
+rm ffi

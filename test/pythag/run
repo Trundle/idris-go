@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+idris --codegen go pythag.idr -o pythag.go
+go build pythag.go
+rm pythag.go pythag.ibc
+./pythag
+rm pythag

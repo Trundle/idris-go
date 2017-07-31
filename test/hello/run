@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+idris --codegen go hello.idr -o hello.go
+go build hello.go
+rm hello.go hello.ibc
+./hello
+rm hello

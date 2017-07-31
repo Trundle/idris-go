@@ -48,4 +48,19 @@ Executable idris-codegen-go
   ghc-prof-options: -auto-all -caf-all
   ghc-options:      -threaded -rtsopts -funbox-strict-fields
 
+Test-suite end-to-end-tests
+  Type:           exitcode-stdio-1.0
+  Main-is:        TestRun.hs
+  hs-source-dirs: test
 
+  Build-depends:  base
+                , bytestring
+                , directory
+                , filepath
+                , process
+                , tasty
+                , tasty-golden >= 2.0
+                , utf8-string
+
+  ghc-prof-options: -auto-all -caf-all
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N -funbox-strict-fields
