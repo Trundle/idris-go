@@ -1,0 +1,24 @@
+sudo: false
+language: go
+go:
+  - stable
+  - 1.9rc1
+cache:
+  directories:
+  - $HOME/.stack
+
+before_install:
+  # Download and unpack the stack executable
+  - mkdir -p ~/.local/bin
+  - export PATH=$HOME/.local/bin:$PATH
+  - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+
+install:
+  # Unfortunately, travis_wait doesn't pass arguments along correctly (see
+  # https://github.com/travis-ci/travis-ci/issues/7020), hence we use sleep
+  # instead of the real command
+  - travis_wait 60 sleep 3600 &
+  - stack --no-terminal --install-ghc test --only-dependencies --ghc-options="+RTS -M1g -A16M -RTS -j1 -O0 -H64M" -j3
+
+script:
+  - stack --no-terminal test
