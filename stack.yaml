@@ -1,9 +1,9 @@
-resolver: lts-8.23
+resolver: lts-9.0
 
 packages:
   - location: .
   - location:
-      git: git@github.com:idris-lang/Idris-dev
+      git: https://github.com/idris-lang/Idris-dev.git
       commit: master
     extra-dep: true
 flags:
@@ -12,6 +12,8 @@ flags:
     GMP: true
 
 extra-deps:
+  - binary-0.8.5.1
+  - cheapskate-0.1.1
   - libffi-0.1
   
 nix:
