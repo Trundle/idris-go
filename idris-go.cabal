@@ -1,6 +1,6 @@
 Name:           idris-go
 Version:        0.0.0.1
-License:        BSD3
+License:        MIT
 License-file:   LICENSE
 Author:         Andreas Stührk
 Maintainer:     Andreas Stührk <andy@hammerhartes.de>
