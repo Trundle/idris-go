@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+idris --codegen go tailrec.idr -o tailrec.go
+go build tailrec.go
+rm tailrec.go tailrec.ibc
+./tailrec
+rm tailrec
