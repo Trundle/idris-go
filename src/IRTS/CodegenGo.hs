@@ -23,7 +23,6 @@ import           IRTS.CodegenCommon
 import           IRTS.Lang                        (FDesc (..), FType (..),
                                                    LVar (..), PrimFn (..))
 import           IRTS.Simplified
-import           IRTS.SSA                         (toSSA)
 
 
 data Line = Line (Maybe Var) [Var] T.Text
@@ -504,7 +503,7 @@ exprToGo f var (SForeign ty (FApp callType callTypeArgs) args) =
       x
       (varToGo var)
       (length varTypes)
-      (T.intercalate ", " [ toPtr varTy (sformat ("__tmp" % int) i) | (i, varTy) <- zip [1..] varTypes ])
+      (T.intercalate ", " [ toPtr varTy (sformat ("__tmp" % int) i) | (i, varTy) <- zip [1 :: Int ..] varTypes ])
     retVal (GoPtr _) x = sformat (stext % " = unsafe.Pointer(" % stext % ")") (varToGo var) x
     retVal t _ = error $ "Not implemented yet: retVal " ++ show t
 
@@ -799,9 +798,8 @@ filterUnusedLines lines =
 
 
 funToGo :: (Name, SDecl, [TailCall]) -> CG T.Text
-funToGo (name, f@(SFun _ args _ _), tailCalls) = do
-  let (locs, ssaExpr) = toSSA f
-  bodyLines <- filterUnusedLines <$> exprToGo name RVal ssaExpr
+funToGo (name, SFun _ args locs expr, tailCalls) = do
+  bodyLines <- filterUnusedLines <$> exprToGo name RVal expr
   let usedVars = extractUsedVars bodyLines
   pure . T.concat $
     [ "// "

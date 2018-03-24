@@ -27,7 +27,7 @@ Executable idris-codegen-go
                 , text
 
   other-modules:  IRTS.CodegenGo
-                , IRTS.SSA
+                , Paths_idris_go
 
   if os(linux)
      cpp-options:   -DLINUX
