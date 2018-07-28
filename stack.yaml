@@ -8,12 +8,9 @@ packages:
     extra-dep: true
 flags:
   idris:
-    FFI: true
+    FFI: false
     GMP: true
 
-extra-deps:
-  - libffi-0.1
-  
 nix:
   enable: false
   shell-file: stack-shell.nix
