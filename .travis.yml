@@ -2,7 +2,7 @@ sudo: false
 language: go
 go:
   - stable
-  - 1.9rc1
+  - tip
 cache:
   directories:
   - $HOME/.stack
